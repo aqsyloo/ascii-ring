@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ASCII-заправка</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;color:#bbb}
+  #app{position:relative;height:100%;width:min(100vw,62vh);margin:0 auto;display:flex;flex-direction:column;background:#000}
+  #stage{position:relative;flex:0 0 61%;overflow:hidden;cursor:pointer;touch-action:manipulation}
+  #cv{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hud{position:absolute;font-size:11px;line-height:1.55;color:#7d8590;pointer-events:none;white-space:pre}
+  #hudL{left:6%;bottom:2.5%}
+  #hudT{right:4%;top:11%;color:#ff5d6c}
+  #hudT b{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff3b4f;margin-right:6px;vertical-align:1px}
+  .btns{position:absolute;left:4%;top:3%;display:flex;gap:6px}
+  .btns button{background:none;border:1px solid #2a2f36;color:#7d8590;font:inherit;font-size:11px;
+    padding:3px 8px;border-radius:4px;cursor:pointer}
+  .btns button:hover{color:#ddd;border-color:#4a525c}
+  #hint{position:absolute;right:4%;top:3%;font-size:10px;color:#4a525c;pointer-events:none}
+  #bar{display:flex;justify-content:space-between;font-size:12px;color:#ddd;padding:6px 3.5%;border-bottom:1px solid #16191d}
+  #bar span:last-child{color:#888}
+  #code{position:relative;flex:1;overflow:hidden;font-size:clamp(10px,3.3vw,15px);line-height:1.6;
+    -webkit-mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%);mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%)}
+  #pre{position:absolute;left:0;right:0;top:0;margin:0;will-change:transform}
+  .ln{display:flex;white-space:pre;border-left:3px solid transparent}
+  .ln i{font-style:normal;color:#33383e;width:3.2em;text-align:right;padding-right:1.4em;flex:none}
+  .ln.cur{background:#160d10;border-left-color:#ff5d6c}
+  .ln.cur i{color:#777}
+  .k{color:#ff7a90}.f{color:#82aaff}.n{color:#f6c177}.s{color:#c3e88d}.c{color:#5a5f66}
+  .cursor{display:inline-block;width:.6em;height:1.1em;vertical-align:-.2em;background:#ff5d6c;animation:bl 1s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="btns"><button id="replay">↻ заново</button><button id="pause">⏸</button></div>
+    <div id="hint">тап — молния</div>
+    <div class="hud" id="hudT"><b></b>t 0.00s</div>
+    <div class="hud" id="hudL"></div>
+  </div>
+  <div id="bar"><span>$ node station.js</span><span id="fps">running · 60 fps</span></div>
+  <div id="code"><div id="pre"></div></div>
+</div>
+
+<script id="src">
+
+// ── station.js — ночная заправка под дождём: неон, лампы, лужи и машина ──
+
+const TAU = Math.PI * 2;
+function rng(seed) {                          // детерминированный генератор
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand = rng(33);
+const smooth = x => (x = Math.min(1, Math.max(0, x)), x * x * (3 - 2 * x));
+const lerp = (a, b, k) => a + (b - a) * k;
+
+// ── сетка с цветом символа и фоном клетки ──
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const glow1 = document.createElement('canvas'), glow2 = document.createElement('canvas');
+let W, H, DPR, cw, chh, cols, rows, G, L;
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  glow1.width = cv.width >> 2; glow1.height = cv.height >> 2;
+  glow2.width = cv.width >> 3; glow2.height = cv.height >> 3;
+  cols = 80; cw = W / cols; chh = cw * 1.55; rows = Math.ceil(H / chh);
+  G = { ch: new Array(cols * rows), fg: new Float32Array(cols * rows * 4), bg: new Float32Array(cols * rows * 4) };
+  const ground = Math.round(rows * 0.66);
+  L = { ground, roof: Math.round(rows * 0.2), canL: 9, canR: 60, pumpTop: ground - 9 };
+  L.fascia = L.roof + 2; L.under = L.roof + 4;
+  drops.length = 0; for (let i = 0; i < 320; i++) drops.push(newDrop(true));
+}
+function clear() { G.ch.fill(' '); G.fg.fill(0); G.bg.fill(0); }
+function put(c, r, ch, rgb, a = 1) {
+  c = Math.round(c); r = Math.round(r); if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+  const i = r * cols + c; G.ch[i] = ch;
+  G.fg[i * 4] = rgb[0]; G.fg[i * 4 + 1] = rgb[1]; G.fg[i * 4 + 2] = rgb[2]; G.fg[i * 4 + 3] = a;
+}
+function fill(c, r, rgb, a = 1) {
+  c = Math.round(c); r = Math.round(r); if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+  const i = r * cols + c;
+  G.bg[i * 4] = rgb[0]; G.bg[i * 4 + 1] = rgb[1]; G.bg[i * 4 + 2] = rgb[2]; G.bg[i * 4 + 3] = a;
+}
+function text(c, r, s, rgb, a = 1) { for (let i = 0; i < s.length; i++) if (s[i] !== ' ') put(c + i, r, s[i], rgb, a); }
+
+// ── свет: лампы под козырьком и фары машины ──
+
+const LAMPS = [18, 34, 50];
+function lightAt(c, r, car) {
+  let l = 0;
+  if (r > L.under) for (const lx of LAMPS) {
+    const d = r - L.under, w = 2 + d * 0.75, dx = Math.abs(c - lx);
+    if (dx < w) l += (1 - dx / w) * Math.max(0, 1 - d / 28) * 0.9;
+  }
+  if (car && car.on) {                         // конус фар вперёд
+    const fx = car.x + CAR_L, d = c - fx, hr = L.ground - 3;
+    if (d > 0 && d < 34 && Math.abs(r - hr) < 1 + d * 0.22) l += (1 - d / 34) * 1.2 * car.on;
+  }
+  return Math.min(1.4, l);
+}
+
+// ── декорации ──
+
+const NEON = '• НОЧНАЯ • 24 ЧАСА •';
+let flick = Array(NEON.length).fill(1);
+function sky(t, bolt) {
+  const r2 = rng(9);
+  for (let r = 0; r < L.ground; r++) for (let c = 0; c < cols; c++) {
+    const n = r2();
+    if (r < L.roof + 2 && n < 0.05) put(c, r, n < 0.02 ? '~' : '-', [70, 80, 110], 0.12 + 0.08 * Math.sin(t * 0.3 + c * 0.1) + bolt * 0.6);
+  }
+  // город на горизонте
+  for (let c = 0; c < cols; c++) {
+    const h = 3 + Math.round(4 * Math.abs(Math.sin(c * 0.21)) + (c % 9 < 2 ? 3 : 0));
+    for (let q = 0; q < h; q++) {
+      const r = L.ground - 10 - q;
+      put(c, r, (c * 3 + q) % 5 === 0 && Math.sin(t * 0.2 + c) > -0.6 ? '.' : ':', (c * 3 + q) % 5 === 0 ? [255, 210, 120] : [40, 45, 60], (c * 3 + q) % 5 === 0 ? 0.7 : 0.35);
+    }
+  }
+}
+
+function canopy(t) {
+  for (let c = L.canL; c <= L.canR; c++) {
+    put(c, L.roof, '_', [120, 125, 140], 0.8);
+    for (let r = L.roof + 1; r <= L.under; r++) fill(c, r, [14, 16, 22], 1);
+    put(c, L.roof + 1, '=', [0, 230, 255], 0.9);                                // неоновые полосы
+    put(c, L.under - 1, '=', [0, 230, 255], 0.9);
+    put(c, L.under, LAMPS.some(l => Math.abs(c - l) < 3) ? '▀' : '-', LAMPS.some(l => Math.abs(c - l) < 3) ? [255, 255, 240] : [80, 85, 100], 1);
+  }
+  // неоновая надпись с редким «миганием» букв
+  for (let i = 0; i < NEON.length; i++) {
+    if (rand() < 0.004) flick[i] = 0.15; flick[i] = Math.min(1, flick[i] + 0.04);
+  }
+  const c0 = Math.round((L.canL + L.canR) / 2 - NEON.length / 2);
+  for (let i = 0; i < NEON.length; i++) put(c0 + i, L.fascia, NEON[i], [255, 60, 180], flick[i]);
+  // опоры
+  for (const pc of [L.canL + 4, L.canR - 4]) for (let r = L.under + 1; r < L.ground; r++) { put(pc, r, '|', [150, 155, 170], 0.7); put(pc + 1, r, '|', [90, 95, 110], 0.7); }
+}
+
+function pylon(t) {                           // стела с ценами
+  const x0 = 1, top = L.ground - 21;
+  for (let r = top; r < top + 11; r++) for (let c = x0; c < x0 + 7; c++) fill(c, r, [12, 18, 40], 1);
+  text(x0 + 1, top + 1, 'АЗС', [255, 60, 180]);
+  const prices = [['92', '55.10'], ['95', '60.40'], ['ДТ', '70.20']];
+  prices.forEach(([k, p], i) => { text(x0, top + 3 + i * 2, k, [180, 190, 210], 0.9); text(x0 + 2, top + 4 + i * 2, p, [255, 200, 60]); });
+  for (let r = top + 11; r < L.ground; r++) put(x0 + 3, r, '|', [90, 95, 110], 0.8);
+}
+
+function shop(t) {
+  const x0 = 64, top = L.ground - 13;
+  for (let c = x0; c < cols; c++) { put(c, top, '_', [120, 125, 140], 0.8); }
+  text(x0 + 2, top + 1, 'МАГАЗИН', [120, 255, 160]);
+  for (let r = top + 3; r < L.ground; r++) for (let c = x0; c < cols; c++) {
+    const win = r < L.ground - 2 && (c - x0) % 6 !== 0 && c < cols - 1;
+    if (win) { fill(c, r, [255, 230, 170], 0.32); if ((c + r) % 4 === 0) put(c, r, '.', [255, 240, 200], 0.4); }
+    else put(c, r, '|', [90, 95, 110], 0.6);
+  }
+  // кассир за стеклом
+  const k = x0 + 9;
+  for (const [dc, dr, ch] of [[0, -6, '@'], [0, -5, '#'], [-1, -5, '/'], [1, -5, '\\'], [0, -4, '#']]) put(k + dc, L.ground + dr, ch, [30, 25, 20], 1);
+}
+
+function pump(px, liters, rub, active, t) {   // колонка с табло
+  const top = L.pumpTop;
+  for (let r = top; r < L.ground; r++) for (let c = px; c < px + 6; c++) fill(c, r, [24, 28, 36], 1);
+  for (let c = px; c < px + 6; c++) { put(c, top, '_', [200, 205, 215], 0.9); }
+  for (let r = top + 1; r < L.ground; r++) { put(px, r, '|', [160, 165, 180], 0.7); put(px + 5, r, '|', [160, 165, 180], 0.7); }
+  for (let c = px + 1; c < px + 5; c++) for (const r of [top + 1, top + 2]) fill(c, r, [10, 30, 15], 1);
+  text(px + 1, top + 1, liters.toFixed(1).padStart(4, ' ').slice(-4), [90, 255, 120], active ? 1 : 0.5);
+  text(px + 1, top + 2, String(Math.round(rub)).padStart(4, ' ').slice(-4), [255, 200, 60], active ? 1 : 0.5);
+  text(px + 1, top + 4, '95', [255, 255, 255], 0.8);
+  put(px + 5, top + 5, active ? ' ' : 'Ⴖ', [200, 200, 210], 0.9);                            // пистолет на месте
+}
+
+// ── машина: седан сбоку, своя форма (не реальная модель) ──
+
+const CAR_L = 30;
+function carMask(u, v) {                      // u — от кормы (0) к носу, v — ряды вверх от земли
+  if (u < 0 || u > CAR_L) return 0;
+  for (const wx of [6.5, CAR_L - 6.5]) {
+    const d = ((u - wx) / 2.7) ** 2 + ((v - 1.25) / 1.3) ** 2;
+    if (d < 1) return 4;                                                      // колесо
+    if (((u - wx) / 3.4) ** 2 + ((v - 1.25) / 1.75) ** 2 < 1) return 0;      // арка
+  }
+  const bodyTop = u < 3 ? 2.6 + u * 0.35 : u < 8 ? 3.6 : u < 22 ? 3.6 : u < CAR_L - 3 ? 3.6 - (u - 22) * 0.08 : 3.2 - (u - CAR_L + 3) * 0.4;
+  const bottom = u < 1.5 || u > CAR_L - 1.5 ? 1.4 : 0.8;
+  if (v > bottom && v < bodyTop) return 1;                                   // кузов
+  const roof = u < 8 || u > 23 ? 0 : u < 11.5 ? 3.6 + (u - 8) / 3.5 * 2.5 : u > 17.5 ? 3.6 + (23 - u) / 5.5 * 2.5 : 6.1;
+  if (v >= 3.6 && v < roof) return v > roof - 0.55 || Math.abs(u - 15) < 0.6 ? 1 : 3;   // крыша, стойка, стёкла
+  return 0;
+}
+const cars = [{ body: [190, 40, 50] }, { body: [40, 90, 200] }, { body: [230, 230, 235] }, { body: [30, 30, 35] }];
+
+function drawCar(car, t) {
+  const g = L.ground;
+  for (let r = g - 8; r <= g; r++) for (let c = Math.floor(car.x - 1); c <= car.x + CAR_L + 1; c++) {
+    const u = c - car.x, v = g - r + 0.5, m = carMask(u, v); if (!m) continue;
+    const lit = lightAt(c, L.under + 8, null);
+    if (m === 4) {                             // колесо со спицами, крутится
+      const wx = u < 15 ? 6.5 : CAR_L - 6.5, a = Math.atan2(v - 1.25, (u - wx) / 1.6) + car.x * 0.6;
+      const rr = Math.hypot((u - wx) / 2.7, (v - 1.25) / 1.3);
+      fill(c, r, [5, 5, 6], 1);
+      put(c, r, rr > 0.7 ? 'O' : rr < 0.3 ? 'o' : '/-\\|'[Math.floor((a / Math.PI * 2 + 8) % 4)], [140, 140, 150], 0.8);
+      continue;
+    }
+    const top = !carMask(u, v + 1);
+    const edge = top ? (carMask(u + 1, v + 1) ? '/' : carMask(u - 1, v + 1) ? '\\' : '_') : null;
+    if (m === 3) {                             // стёкла отражают неон
+      fill(c, r, [20, 30, 50], 1);
+      put(c, r, (c + r) % 3 ? ' ' : '/', [0, 230, 255], 0.35 + 0.3 * lit); continue;
+    }
+    fill(c, r, car.body.map(x => x * (0.25 + 0.35 * lit)), 1);
+    put(c, r, top ? edge : (r === g - 2 ? '-' : ' '), top ? [255, 255, 255] : [200, 200, 210], top ? 0.5 + 0.5 * lit : 0.35);
+  }
+  // фары, стопы, ручка, лючок бака
+  put(car.x + CAR_L, g - 3, '■', [255, 255, 230], car.on);
+  put(car.x, g - 3, '▌', [255, 30, 40], 0.5 + 0.5 * car.brake);
+  put(car.x + 4, g - 4, '▫', [180, 180, 190], 0.8);
+  put(car.x + 17, g - 3, '-', [230, 230, 240], 0.8);
+}
+
+// ── дождь, всплески, лужи ──
+
+const drops = [], ripples = [];
+function newDrop(any) {
+  return { x: rand() * (cols + 20), y: any ? rand() * rows : -rand() * 10, vy: 38 + rand() * 18, vx: -7 - rand() * 3,
+           floor: 0, len: rand() < 0.3 ? 2 : 1 };
+}
+function rain(dt, car, bolt) {
+  for (const d of drops) {
+    d.x += d.vx * dt; d.y += d.vy * dt;
+    const c = Math.round(d.x), r = Math.round(d.y);
+    const onRoof = c >= L.canL && c <= L.canR && r >= L.roof && r < L.roof + 1;
+    const onCar = car && c > car.x && c < car.x + CAR_L && r >= L.ground - 6 && carMask(c - car.x, L.ground - r + 0.5) && rand() < 0.4;
+    const hitGround = d.y > L.ground + (d.floor || (d.floor = rand() * (rows - L.ground)));
+    if (onRoof || onCar || hitGround) {
+      if (!onRoof) ripples.push({ c, r, life: 0, max: hitGround ? 0.45 : 0.15 });
+      Object.assign(d, newDrop(false));
+      continue;
+    }
+    const lit = lightAt(c, r, car);
+    const under = c > L.canL && c < L.canR && r > L.roof && r < L.ground;   // под козырьком сухо
+    if (under) continue;
+    const ci = r * cols + c;
+    if (r >= 0 && r < rows && c >= 0 && c < cols && (G.bg[ci * 4 + 3] > 0.3 || (G.fg[ci * 4 + 3] > 0.5 && G.ch[ci] !== ' '))) continue;
+    for (let q = 0; q < d.len; q++)
+      put(c + q * 0.2, r - q, '/', [150 + 100 * lit, 170 + 80 * lit, 210 + 40 * lit], 0.18 + 0.6 * lit + bolt * 0.5);
+  }
+  for (const p of ripples) p.life += dt;
+  for (let i = ripples.length - 1; i >= 0; i--) if (ripples[i].life > ripples[i].max) ripples.splice(i, 1);
+  for (const p of ripples) {
+    const k = p.life / p.max, lit = lightAt(p.c, p.r, car);
+    const a = (1 - k) * (0.35 + 0.6 * lit);
+    if (k < 0.35) put(p.c, p.r, '.', [200, 220, 255], a);
+    else { put(p.c - 1, p.r, '(', [200, 220, 255], a); put(p.c + 1, p.r, ')', [200, 220, 255], a); if (k > 0.7) { put(p.c - 2, p.r, '-', [200, 220, 255], a * 0.6); put(p.c + 2, p.r, '-', [200, 220, 255], a * 0.6); } }
+  }
+}
+
+// мокрый асфальт: зеркалим всё, что выше земли, с рябью
+function reflect(t) {
+  const g = L.ground;
+  for (let c = 0; c < cols; c++) put(c, g, '_', [70, 75, 90], 0.6);
+  for (let r = g + 1; r < rows; r++) {
+    const src = 2 * g - r; if (src < 0) continue;
+    const fade = Math.max(0, 1 - (r - g) / (rows - g)) * 0.42;
+    const wob = Math.round(Math.sin(r * 0.9 + t * 3) * 0.8);
+    for (let c = 0; c < cols; c++) {
+      const s = src * cols + Math.min(cols - 1, Math.max(0, c + wob)), d = r * cols + c;
+      const ba = G.bg[s * 4 + 3], fa = G.fg[s * 4 + 3];
+      if (ba > 0.2) { G.bg[d * 4] = G.bg[s * 4] * 0.6; G.bg[d * 4 + 1] = G.bg[s * 4 + 1] * 0.6; G.bg[d * 4 + 2] = G.bg[s * 4 + 2] * 0.6; G.bg[d * 4 + 3] = ba * fade; }
+      if (fa > 0.25 && G.ch[s] !== ' ') {
+        G.ch[d] = (c + r) % 3 ? G.ch[s] : '~';
+        for (let k = 0; k < 3; k++) G.fg[d * 4 + k] = G.fg[s * 4 + k];
+        G.fg[d * 4 + 3] = fa * fade * 1.3;
+      }
+    }
+  }
+}
+
+// ── сценарий: машина подъезжает, заправляется и уезжает ──
+
+const CYCLE = 30, STOP = 14;
+function carState(t) {
+  const c = t % CYCLE, idx = Math.floor(t / CYCLE) % cars.length;
+  let x, on = 1, brake = 0, fuel = 0;
+  if (c < 4) x = -CAR_L - 30;
+  else if (c < 9) { const k = (c - 4) / 5; x = lerp(-CAR_L - 4, STOP, 1 - Math.pow(1 - k, 2.6)); brake = k > 0.6 ? 1 : 0; }
+  else if (c < 23) { x = STOP; brake = c < 10 ? 1 : 0; on = c < 10 ? 1 : 0.25; fuel = smooth((c - 11.5) / 9); }
+  else { const k = (c - 23) / 7; x = STOP + Math.pow(k, 2) * 110; }
+  return { c, x, on, brake, fuel, ...cars[idx], filling: c > 11.5 && c < 20.5, hose: c > 10.5 && c < 21.5 };
+}
+
+function hose(car, px) {                      // шланг провисает дугой от колонки к лючку
+  const ax = px + 5, ay = L.pumpTop + 5, bx = car.x + 4, by = L.ground - 4;
+  for (let i = 0; i <= 24; i++) {
+    const k = i / 24, x = lerp(ax, bx, k), y = lerp(ay, by, k) + Math.sin(k * Math.PI) * 2.5;
+    put(x, y, '.', [30, 30, 35], 1); put(x, y, '•', [70, 70, 80], 0.9);
+  }
+}
+
+function driver(car, t) {                     // водитель стоит у машины, пока заправляется
+  const a = smooth((car.c - 10.5) / 0.8) * (1 - smooth((car.c - 21.5) / 0.8));
+  if (a <= 0) return;
+  const x = car.x + 2, g = L.ground;
+  const fig = [[0, -9, '@'], [0, -8, '#'], [-1, -8, '/'], [1, -8, '#'], [0, -7, '#'], [2, -7, '\\'], [0, -6, '#'], [-1, -5, '/'], [1, -5, '\\'], [-1, -4, '|'], [1, -4, '|']];
+  for (const [dc, dr, ch] of fig) { fill(x + dc, g + dr + 4, [0, 0, 0], a); put(x + dc, g + dr + 4, ch, [255, 200, 220], 0.25 * a); }
+}
+
+// ── сборка кадра ──
+
+const stats = { liters: 0, rub: 0, drops: 0, letters: 0 };
+let bolt = 0, nextBolt = 9;
+
+function flush() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = bolt > 0.05 ? `rgb(${40 * bolt | 0},${45 * bolt | 0},${70 * bolt | 0})` : '#000'; ctx.fillRect(0, 0, W, H);
+  ctx.font = `${Math.min(chh * 0.95, cw / 0.6).toFixed(2)}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  for (let i = 0; i < cols * rows; i++) {
+    const a = G.bg[i * 4 + 3]; if (a <= 0.01) continue;
+    ctx.fillStyle = `rgba(${G.bg[i * 4] | 0},${G.bg[i * 4 + 1] | 0},${G.bg[i * 4 + 2] | 0},${a.toFixed(3)})`;
+    ctx.fillRect((i % cols) * cw, ((i / cols) | 0) * chh, cw + 0.6, chh + 0.6);
+  }
+  let n = 0;
+  for (let i = 0; i < cols * rows; i++) {
+    const a = G.fg[i * 4 + 3]; if (a <= 0.01 || G.ch[i] === ' ') continue;
+    ctx.fillStyle = `rgba(${G.fg[i * 4] | 0},${G.fg[i * 4 + 1] | 0},${G.fg[i * 4 + 2] | 0},${Math.min(1, a).toFixed(3)})`;
+    ctx.fillText(G.ch[i], (i % cols) * cw + cw / 2, ((i / cols) | 0) * chh); n++;
+  }
+  stats.letters = n;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const g1 = glow1.getContext('2d'), g2 = glow2.getContext('2d');
+  g1.clearRect(0, 0, glow1.width, glow1.height); g1.drawImage(cv, 0, 0, glow1.width, glow1.height);
+  g2.clearRect(0, 0, glow2.width, glow2.height); g2.drawImage(glow1, 0, 0, glow2.width, glow2.height);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.55; ctx.drawImage(glow1, 0, 0, cv.width, cv.height);
+  ctx.globalAlpha = 0.55; ctx.drawImage(glow2, 0, 0, cv.width, cv.height);
+}
+
+function render(t, dt) {
+  const car = carState(t);
+  if (t > nextBolt) { bolt = 1; nextBolt = t + 12 + rand() * 14; thunder(); }
+  clear();
+  sky(t, bolt);
+  pylon(t); shop(t);
+  // свет ламп на асфальте под козырьком
+  for (let r = L.under + 1; r <= L.ground; r++) for (let c = L.canL; c <= L.canR; c++) {
+    const l = lightAt(c, r, null); if (l > 0.15 && r === L.ground) put(c, r, '=', [255, 250, 230], l * 0.5);
+  }
+  canopy(t);
+  const liters = car.fuel * 38, rub = liters * 60.4;
+  pump(24, 0, 0, false, t);
+  pump(38, liters, rub, car.filling, t);
+  stats.liters = liters; stats.rub = rub;
+  drawCar(car, t);
+  if (car.hose) hose(car, 38);
+  driver(car, t);
+  reflect(t);
+  rain(dt, car, bolt);
+  stats.drops = drops.length + ripples.length;
+  flush();
+  bolt *= Math.pow(0.02, dt);
+  return car;
+}
+function thunder() { try { window.Telegram.WebApp.HapticFeedback.impactOccurred('heavy'); } catch (e) {} }
+
+// ── панель кода: показывает этот самый файл и «печатает» текущую строку ──
+
+const SRC = document.getElementById('src').textContent.replace(/^\n+|\s+$/g, '').split('\n');
+const KW = /^(const|let|var|function|return|for|if|else|of|new|while|continue|break|true|false|null)$/;
+function hl(line) {
+  const esc = x => x.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const re = /(\/\/.*$)|('(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(line))) {
+    out += esc(line.slice(last, m.index));
+    const tok = esc(m[0]);
+    if (m[1]) out += `<span class="c">${tok}</span>`;
+    else if (m[2]) out += `<span class="s">${tok}</span>`;
+    else if (m[3]) out += `<span class="n">${tok}</span>`;
+    else if (KW.test(m[4])) out += `<span class="k">${tok}</span>`;
+    else if (line[re.lastIndex] === '(') out += `<span class="f">${tok}</span>`;
+    else out += tok;
+    last = re.lastIndex;
+  }
+  return out + esc(line.slice(last));
+}
+const pre = document.getElementById('pre'), codeBox = document.getElementById('code');
+const rowsEl = SRC.map((l, i) => {
+  const d = document.createElement('div'); d.className = 'ln';
+  d.innerHTML = `<i>${i + 1}</i><span>${hl(l) || ' '}</span>`;
+  pre.appendChild(d); return d;
+});
+const LINES_PER_S = 7, CODE_LOOP = SRC.length / LINES_PER_S + 6;
+let curLine = -1, curChars = -1, scrollY = 0;
+
+function code(t) {
+  const pos = Math.min(SRC.length - 1e-3, t * LINES_PER_S);
+  const li = Math.floor(pos), text = SRC[li];
+  const nch = Math.floor((pos - li) * 1.4 * text.length);
+  if (li !== curLine) {
+    if (curLine >= 0 && rowsEl[curLine]) {
+      rowsEl[curLine].classList.remove('cur');
+      rowsEl[curLine].lastChild.innerHTML = hl(SRC[curLine]) || ' ';
+    }
+    curLine = li; curChars = -1; rowsEl[li].classList.add('cur');
+  }
+  if (nch !== curChars) {
+    curChars = nch;
+    rowsEl[li].lastChild.innerHTML = hl(text.slice(0, nch)) + '<span class="cursor"></span>';
+  }
+  const target = rowsEl[li].offsetTop - codeBox.clientHeight * 0.38;
+  scrollY += (target - scrollY) * 0.12;
+  pre.style.transform = `translateY(${-scrollY.toFixed(1)}px)`;
+}
+
+// ── цикл анимации ──
+
+const hudT = document.getElementById('hudT'), hudL = document.getElementById('hudL');
+const fpsEl = document.getElementById('fps'), pauseBtn = document.getElementById('pause');
+let paused = false, clock = 0, lastNow = performance.now(), fps = 60;
+
+function reset() { clock = 0; scrollY = 0; nextBolt = 9; }
+
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.1, (now - lastNow) / 1000)); lastNow = now;
+  fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  if (!paused) clock += dt;
+  const car = render(clock, paused ? 0 : dt);
+  code(clock % CODE_LOOP);
+  hudT.innerHTML = `<b></b>t ${clock.toFixed(2)}s`;
+  const st = car.c < 4 ? 'пусто' : car.c < 9 ? 'подъезжает' : car.filling ? 'заправка' : car.c < 23 ? 'колонка №2' : 'уезжает';
+  hudL.textContent = `ascii station · 2026   ${st}\nАИ-95  ${stats.liters.toFixed(1)} л   ${Math.round(stats.rub).toLocaleString('ru')} ₽\nrain ${stats.drops}   letters ${stats.letters.toLocaleString('en')}`;
+  fpsEl.textContent = paused ? 'paused' : `running · ${Math.round(fps)} fps`;
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('stage').addEventListener('click', e => {
+  if (e.target.id === 'replay') { reset(); paused = false; pauseBtn.textContent = '⏸'; return; }
+  if (e.target.id === 'pause') { paused = !paused; pauseBtn.textContent = paused ? '▶' : '⏸'; return; }
+  if (paused) return;
+  bolt = 1; thunder();                         // молния по тапу
+});
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+
+// Telegram Mini App: на весь экран, чёрная шапка
+try {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+  }
+} catch (e) {}
+</script>
+</body>
+</html>
