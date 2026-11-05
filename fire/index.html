@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ASCII-костёр</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;color:#bbb}
+  #app{position:relative;height:100%;width:min(100vw,62vh);margin:0 auto;display:flex;flex-direction:column;background:#000}
+  #stage{position:relative;flex:0 0 61%;overflow:hidden;cursor:pointer;touch-action:manipulation}
+  #cv{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hud{position:absolute;font-size:11px;line-height:1.55;color:#8a7a70;pointer-events:none;white-space:pre}
+  #hudL{left:6%;bottom:2.5%}
+  #hudT{right:4%;top:11%;color:#ff8a4c}
+  #hudT b{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff6a2b;margin-right:6px;vertical-align:1px}
+  .btns{position:absolute;left:4%;top:3%;display:flex;gap:6px}
+  .btns button{background:none;border:1px solid #332a24;color:#8a7a70;font:inherit;font-size:11px;
+    padding:3px 8px;border-radius:4px;cursor:pointer}
+  .btns button:hover{color:#ddd;border-color:#665046}
+  #hint{position:absolute;right:4%;top:3%;font-size:10px;color:#5a4a40;pointer-events:none}
+  #bar{display:flex;justify-content:space-between;font-size:12px;color:#ddd;padding:6px 3.5%;border-bottom:1px solid #1c1714}
+  #bar span:last-child{color:#888}
+  #code{position:relative;flex:1;overflow:hidden;font-size:clamp(10px,3.3vw,15px);line-height:1.6;
+    -webkit-mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%);mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%)}
+  #pre{position:absolute;left:0;right:0;top:0;margin:0;will-change:transform}
+  .ln{display:flex;white-space:pre;border-left:3px solid transparent}
+  .ln i{font-style:normal;color:#3d3632;width:3.2em;text-align:right;padding-right:1.4em;flex:none}
+  .ln.cur{background:#1c110a;border-left-color:#ff8a4c}
+  .ln.cur i{color:#777}
+  .k{color:#ff8a6a}.f{color:#82aaff}.n{color:#f6c177}.s{color:#c3e88d}.c{color:#5f5a56}
+  .cursor{display:inline-block;width:.6em;height:1.1em;vertical-align:-.2em;background:#ff8a4c;animation:bl 1s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="btns"><button id="replay">↻ заново</button><button id="pause">⏸</button></div>
+    <div id="hint">тап — подбросить искр</div>
+    <div class="hud" id="hudT"><b></b>t 0.00s</div>
+    <div class="hud" id="hudL"></div>
+  </div>
+  <div id="bar"><span>$ node fire.js</span><span id="fps">running · 60 fps</span></div>
+  <div id="code"><div id="pre"></div></div>
+</div>
+
+<script id="src">
+// ── fire.js — костёр из букв: поленья, камни, пламя, искры и дым ──
+
+const TAU = Math.PI * 2;
+const WOOD = 0, CAP = 1, STONE = 2, GROUND = 3;
+
+function rng(seed) {                          // детерминированный генератор
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand = rng(3);
+const pts = [];
+
+function add(x, y, z, nx, ny, nz, kind) {
+  const l = Math.hypot(nx, ny, nz) || 1;
+  pts.push({ x, y, z, nx: nx / l, ny: ny / l, nz: nz / l, kind, h: rand() });
+}
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const unit = v => { const l = Math.hypot(...v); return v.map(c => c / l); };
+
+// ── геометрия: полено = цилиндр с корой и спилами на торцах ──
+
+function log(p0, p1, r) {
+  const d = unit(sub(p1, p0)), L = Math.hypot(...sub(p1, p0));
+  const u = unit(cross(d, Math.abs(d[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0])), v = cross(d, u);
+  const n = Math.round(L * 150);
+  for (let i = 0; i <= n; i++) {
+    const t = i / n * L;
+    for (let j = 0; j < 22; j++) {
+      const w = j / 22 * TAU, c = Math.cos(w), s = Math.sin(w);
+      const rr = r * (1 + 0.06 * Math.sin(w * 7 + t * 9));        // кора
+      const nx = u[0] * c + v[0] * s, ny = u[1] * c + v[1] * s, nz = u[2] * c + v[2] * s;
+      add(p0[0] + d[0] * t + nx * rr, p0[1] + d[1] * t + ny * rr, p0[2] + d[2] * t + nz * rr, nx, ny, nz, WOOD);
+    }
+  }
+  for (const [p, sg] of [[p0, -1], [p1, 1]]) {                    // торцы с кольцами
+    for (let i = 0; i < 160; i++) {
+      const w = rand() * TAU, q = r * Math.sqrt(rand());
+      const ox = (u[0] * Math.cos(w) + v[0] * Math.sin(w)) * q;
+      const oy = (u[1] * Math.cos(w) + v[1] * Math.sin(w)) * q;
+      const oz = (u[2] * Math.cos(w) + v[2] * Math.sin(w)) * q;
+      const pt = { ring: q / r };
+      add(p[0] + ox, p[1] + oy, p[2] + oz, d[0] * sg, d[1] * sg, d[2] * sg, CAP);
+      pts[pts.length - 1].ring = pt.ring;
+    }
+  }
+}
+
+function stones() {
+  for (let k = 0; k < 11; k++) {
+    const a = k / 11 * TAU + 0.2, R = 1.05 + 0.06 * Math.sin(k * 3);
+    const sx = Math.cos(a) * R, sz = Math.sin(a) * R, rx = 0.15 + rand() * 0.05, ry = 0.1 + rand() * 0.04;
+    for (let i = 0; i < 260; i++) {
+      const th = rand() * TAU, ph = Math.acos(rand());              // верхняя полусфера
+      const nx = Math.sin(ph) * Math.cos(th), ny = Math.cos(ph), nz = Math.sin(ph) * Math.sin(th);
+      add(sx + nx * rx, ny * ry, sz + nz * rx, nx / rx, ny / ry, nz / rx, STONE);
+    }
+  }
+}
+
+function ground() {
+  for (let i = 0; i < 3200; i++) {
+    const a = rand() * TAU, r = 1.55 * Math.sqrt(rand());
+    add(Math.cos(a) * r, 0, Math.sin(a) * r, 0, 1, 0, GROUND);
+  }
+}
+
+// два бревна крест-накрест и три полена шалашом
+log([-0.85, 0.12, -0.25], [0.85, 0.12, 0.25], 0.12);
+log([-0.3, 0.1, 0.8], [0.3, 0.1, -0.8], 0.11);
+for (let k = 0; k < 3; k++) {
+  const a = k / 3 * TAU + 0.5;
+  log([Math.cos(a) * 0.7, 0.05, Math.sin(a) * 0.7], [Math.cos(a) * 0.08, 0.85, Math.sin(a) * 0.08], 0.075);
+}
+stones(); ground();
+
+// порядок появления: геометрия «прорисовывается» слева направо
+for (const p of pts) p.order = (p.x + 2) / 4 + p.h * 0.04;
+const DRAW = [0.2, 2.4], IGNITE = [2.0, 4.5];
+
+const smooth = x => (x = Math.min(1, Math.max(0, x)), x * x * (3 - 2 * x));
+const RAMP = [' ', '.', '.,:', ':;-', '-=~+', '+<>()=', 'tjf[]{}?', 'aeozsu?', '0O%&e', '@$#&', '@$#'];
+const glyph = (b, h) => { const s = RAMP[Math.min(10, Math.floor(b * 9))]; return s[(h * s.length) | 0]; };
+const FIRE = ' .,:;-=+*oa%#&@';
+
+function heatColor(h) {                       // тёмно-красный → оранжевый → жёлтый → белый
+  const st = [[0, 40, 0, 0], [.3, 190, 30, 0], [.55, 255, 105, 0], [.8, 255, 190, 40], [1, 255, 250, 210]];
+  for (let i = 1; i < st.length; i++) if (h <= st[i][0]) {
+    const a = st[i - 1], b = st[i], k = (h - a[0]) / (b[0] - a[0]);
+    return [a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k, a[3] + (b[3] - a[3]) * k];
+  }
+  return [255, 250, 210];
+}
+
+// ── холст и сетка символов ──
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const glow1 = document.createElement('canvas'), glow2 = document.createElement('canvas');
+let W, H, DPR, cw, chh, cols, rows, s, cx, cy, stars = [];
+let zb, bb, cb, kb, heat, heat2, fireBase, fireCx, fireW, fireRows, colNoise;
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  glow1.width = cv.width >> 2; glow1.height = cv.height >> 2;
+  glow2.width = cv.width >> 3; glow2.height = cv.height >> 3;
+  cols = 88; cw = W / cols; chh = cw * 1.55; rows = Math.ceil(H / chh);
+  s = Math.min(H * 0.27, W * 0.31);
+  cx = W / 2; cy = H * 0.74;
+  const n = cols * rows;
+  zb = new Float32Array(n); bb = new Float32Array(n); cb = new Array(n); kb = new Int8Array(n);
+  heat = new Float32Array(n); heat2 = new Float32Array(n); colNoise = new Float32Array(cols);
+  const base = project(0, 0.18, 0, 1, 0);
+  fireBase = Math.round(base[1] / chh); fireCx = base[0] / cw;
+  fireW = s * 0.6 / cw; fireRows = s * 2.3 / chh;
+  const r = rng(7); stars = [];
+  for (let i = 0; i < 200; i++)
+    stars.push({ c: (r() * cols) | 0, r: (r() * rows * 0.6) | 0, a: 0.04 + r() * 0.25,
+                 p: r() * TAU, ch: '..........·+*'[(r() * 13) | 0] });
+}
+
+const TILT = 0.42;                            // смотрим на костёр чуть сверху
+function project(x, y, z, ca, sa) {
+  const xr = x * ca + z * sa, zr = -x * sa + z * ca;
+  const yr = y * Math.cos(TILT) - zr * Math.sin(TILT), zt = y * Math.sin(TILT) + zr * Math.cos(TILT);
+  const f = 5 / (5 - zt);
+  return [cx + xr * s * f, cy - yr * s * f, zt];
+}
+
+// ── пламя: классическая «doom fire» — жар поднимается вверх и остывает ──
+
+function fireStep(I, wind, t) {
+  for (let c = 0; c < cols; c++) colNoise[c] = colNoise[c] * 0.9 + (rand() - 0.5) * 0.25;
+  const cool = 0.8 / Math.max(4, fireRows);
+  for (let c = 0; c < cols; c++) {             // источник жара над поленьями
+    const d = (c - fireCx) / fireW;
+    const src = I * Math.exp(-d * d * 1.7) * (0.7 + 0.3 * rand());
+    for (const r of [fireBase, fireBase + 1]) if (r < rows) heat[r * cols + c] = src;
+  }
+  for (let r = 0; r < Math.min(rows - 1, fireBase); r++) {
+    for (let c = 0; c < cols; c++) {
+      const j = Math.round(rand() * 2 - 1 + wind * 0.45 + Math.sin(t * 1.3 + r * 0.15) * 0.25);
+      const sc = Math.min(cols - 1, Math.max(0, c + j));
+      const k = (0.4 + rand() * 1.6) * (1 + colNoise[c]);
+      heat2[r * cols + c] = Math.max(0, heat[(r + 1) * cols + sc] - cool * k);
+    }
+  }
+  for (let r = 0; r < Math.min(rows - 1, fireBase); r++)
+    for (let c = 0; c < cols; c++) heat[r * cols + c] = heat2[r * cols + c];
+}
+
+// ── искры и дым ──
+
+const sparks = [], smoke = [];
+function spawnSpark(I, burst = 0) {
+  const a = rand() * TAU, r = rand() * 0.25;
+  sparks.push({ x: Math.cos(a) * r, y: 0.5 + rand() * 0.4, z: Math.sin(a) * r,
+    vx: (rand() - .5) * (0.5 + burst), vy: 1.1 + rand() * 1.6 + burst * 1.2, vz: (rand() - .5) * (0.5 + burst),
+    life: 0, max: 1.4 + rand() * 2.2, seed: rand() * TAU, px: null, py: null });
+}
+function spawnSmoke() {
+  smoke.push({ x: (rand() - .5) * 0.3, y: 1.6 + rand() * 0.3, z: (rand() - .5) * 0.3,
+    life: 0, max: 5 + rand() * 3, seed: rand() * TAU, ch: '~()~.~'[(rand() * 6) | 0] });
+}
+function updateParticles(dt, t, wind) {
+  for (const p of sparks) {
+    p.life += dt;
+    p.vx += (Math.sin(t * 4 + p.seed) * 0.9 + wind * 0.6) * dt;   // спираль и ветер
+    p.vz += Math.cos(t * 3.3 + p.seed) * 0.9 * dt;
+    p.vy *= 1 - 0.35 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+  }
+  for (const p of smoke) {
+    p.life += dt;
+    p.x += (Math.sin(t * 0.7 + p.seed) * 0.12 + wind * 0.12) * dt; p.y += 0.28 * dt;
+  }
+  for (const arr of [sparks, smoke])
+    for (let i = arr.length - 1; i >= 0; i--) if (arr[i].life > arr[i].max) arr.splice(i, 1);
+}
+
+// ── рендер ──
+
+const stats = { heat: 0, sparks: 0, letters: 0 };
+let flare = 0;
+
+function render(t, I) {
+  const n = cols * rows;
+  zb.fill(-1e9); kb.fill(-1);
+  const head = (t - DRAW[0]) / (DRAW[1] - DRAW[0]) * 1.1;
+  const a = 0.6 + 0.35 * Math.sin(t * 0.12), ca = Math.cos(a), sa = Math.sin(a);
+  const ct = Math.cos(TILT), st = Math.sin(TILT);
+  const flick = I * (0.82 + 0.12 * Math.sin(t * 17) + 0.08 * Math.sin(t * 29.7) + 0.25 * flare);
+
+  for (const p of pts) {
+    if (p.order > head) continue;
+    const k = smooth((head - p.order) / 0.08);
+    const [sx, sy, z] = project(p.x, p.y, p.z, ca, sa);
+    const c = (sx / cw) | 0, r = (sy / chh) | 0;
+    if (c < 0 || c >= cols || r < 0 || r >= rows) continue;
+    const idx = r * cols + c;
+    if (z <= zb[idx]) continue;
+    zb[idx] = z;
+    // свет от огня: точка над центром костра, затухание с расстоянием
+    const lx = -p.x, ly = 0.55 - p.y, lz = -p.z, ld = Math.hypot(lx, ly, lz);
+    const diff = Math.max(0, (p.nx * lx + p.ny * ly + p.nz * lz) / ld);
+    const att = 1 / (1 + ld * ld * 2.2);
+    let b = 0.1 + flick * (0.35 + 0.65 * diff) * att * 2.4;
+    if (p.kind === GROUND) b = 0.02 + flick * att * 0.9 * (0.6 + 0.6 * p.h);
+    if (p.kind === CAP) b *= 0.9 + 0.5 * Math.abs(Math.sin(p.ring * 18));   // годичные кольца
+    if (p.kind === WOOD && ld < 0.55) {                                     // тлеющие угли
+      const ember = Math.max(0, Math.sin(t * 2 + p.h * 40)) * (0.55 - ld) * 2.4 * Math.max(0.3, I);
+      if (ember > b) { b = ember; kb[idx] = 9; }
+    }
+    b *= k;
+    bb[idx] = b; if (kb[idx] !== 9) kb[idx] = p.kind;
+    cb[idx] = p.kind === GROUND ? '.,`\''[(p.h * 4) | 0] : glyph(Math.min(1.1, b + 0.1), p.h);
+  }
+  draw(t, I, ca, sa);
+}
+
+function draw(t, I, ca, sa) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  ctx.font = `${Math.min(chh * 0.95, cw / 0.6).toFixed(2)}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  const put = (c, r, ch, rgb, al) => {
+    if (al < 0.01) return;
+    ctx.fillStyle = `rgba(${rgb[0] | 0},${rgb[1] | 0},${rgb[2] | 0},${Math.min(1, al).toFixed(3)})`;
+    ctx.fillText(ch, c * cw + cw / 2, r * chh);
+  };
+
+  for (const s0 of stars) put(s0.c, s0.r, s0.ch, [220, 220, 255], s0.a * (0.55 + 0.45 * Math.sin(t * 1.5 + s0.p)));
+
+  // дым — за пламенем
+  for (const p of smoke) {
+    const [sx, sy] = project(p.x, p.y, p.z, ca, sa), k = p.life / p.max;
+    const al = 0.2 * Math.sin(Math.PI * k) * I;
+    const spread = 1 + k * 3;
+    put(Math.round(sx / cw + Math.sin(p.seed) * spread), Math.round(sy / chh), p.ch, [150, 135, 125], al);
+  }
+
+  // поленья, камни, земля
+  let letters = 0;
+  const col = { 0: [255, 150, 80], 1: [255, 190, 120], 2: [215, 170, 140], 3: [255, 120, 50], 9: [255, 80, 20] };
+  for (let i = 0; i < cols * rows; i++) {
+    if (zb[i] < -1e8 || heat[i] > 0.38) continue;
+    const ch = cb[i]; if (ch === ' ') continue;
+    const b = bb[i], k = kb[i], c0 = col[k];
+    const lum = Math.min(1, 0.25 + b);
+    put(i % cols, (i / cols) | 0, ch, [c0[0] * lum, c0[1] * lum, c0[2] * lum], Math.min(1, 0.12 + b));
+    letters++;
+  }
+
+  // пламя
+  let hsum = 0;
+  for (let i = 0; i < cols * rows; i++) {
+    const h = heat[i]; if (h < 0.06) continue;
+    const c = i % cols, r = (i / cols) | 0;
+    hsum += h; letters++;
+    const f = Math.floor(t * 14);
+    const ch = FIRE[Math.min(FIRE.length - 1, Math.floor(h * FIRE.length * (0.85 + 0.3 * ((c * 7 + r * 13 + f) % 5) / 5)))];
+    put(c, r, ch, heatColor(Math.min(1, h)), Math.min(1, h * 2.2));
+  }
+  stats.heat = Math.round(Math.min(1, hsum / (fireW * fireRows * 0.45 + 1)) * 100);
+
+  // искры со следом
+  for (const p of sparks) {
+    const [sx, sy] = project(p.x, p.y, p.z, ca, sa);
+    const k = p.life / p.max, c = Math.round(sx / cw), r = Math.round(sy / chh);
+    const hot = heatColor(Math.max(0.35, 1 - k * 0.9)), al = (1 - k) * 1.1;
+    if (p.px !== null) {
+      const tc = Math.round((p.px * 2 - sx) / cw), tr = Math.round((p.py * 2 - sy) / chh);
+      if (tc !== c || tr !== r) put(tc, tr, Math.abs(tc - c) > Math.abs(tr - r) ? '-' : (tc < c ? '/' : tc > c ? '\\' : '\''), hot, al * 0.4);
+    }
+    put(c, r, k < 0.25 ? '*' : k < 0.6 ? '+' : '.', hot, al);
+    p.px = sx; p.py = sy;
+  }
+  stats.sparks = sparks.length; stats.letters = letters;
+
+  // тёплое свечение
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const g1 = glow1.getContext('2d'), g2 = glow2.getContext('2d');
+  g1.clearRect(0, 0, glow1.width, glow1.height); g1.drawImage(cv, 0, 0, glow1.width, glow1.height);
+  g2.clearRect(0, 0, glow2.width, glow2.height); g2.drawImage(glow1, 0, 0, glow2.width, glow2.height);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.6; ctx.drawImage(glow1, 0, 0, cv.width, cv.height);
+  ctx.globalAlpha = 0.65; ctx.drawImage(glow2, 0, 0, cv.width, cv.height);
+}
+
+// ── панель кода: показывает этот самый файл и «печатает» текущую строку ──
+
+const SRC = document.getElementById('src').textContent.replace(/^\n+|\s+$/g, '').split('\n');
+const KW = /^(const|let|var|function|return|for|if|else|of|new|while|continue|break|true|false|null)$/;
+function hl(line) {
+  const esc = x => x.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const re = /(\/\/.*$)|('(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(line))) {
+    out += esc(line.slice(last, m.index));
+    const tok = esc(m[0]);
+    if (m[1]) out += `<span class="c">${tok}</span>`;
+    else if (m[2]) out += `<span class="s">${tok}</span>`;
+    else if (m[3]) out += `<span class="n">${tok}</span>`;
+    else if (KW.test(m[4])) out += `<span class="k">${tok}</span>`;
+    else if (line[re.lastIndex] === '(') out += `<span class="f">${tok}</span>`;
+    else out += tok;
+    last = re.lastIndex;
+  }
+  return out + esc(line.slice(last));
+}
+const pre = document.getElementById('pre'), codeBox = document.getElementById('code');
+const rowsEl = SRC.map((l, i) => {
+  const d = document.createElement('div'); d.className = 'ln';
+  d.innerHTML = `<i>${i + 1}</i><span>${hl(l) || ' '}</span>`;
+  pre.appendChild(d); return d;
+});
+const LINES_PER_S = 7, CODE_LOOP = SRC.length / LINES_PER_S + 6;
+let curLine = -1, curChars = -1, scrollY = 0;
+
+function code(t) {
+  const pos = Math.min(SRC.length - 1e-3, t * LINES_PER_S);
+  const li = Math.floor(pos), text = SRC[li];
+  const nch = Math.floor((pos - li) * 1.4 * text.length);
+  if (li !== curLine) {
+    if (curLine >= 0 && rowsEl[curLine]) {
+      rowsEl[curLine].classList.remove('cur');
+      rowsEl[curLine].lastChild.innerHTML = hl(SRC[curLine]) || ' ';
+    }
+    curLine = li; curChars = -1; rowsEl[li].classList.add('cur');
+  }
+  if (nch !== curChars) {
+    curChars = nch;
+    rowsEl[li].lastChild.innerHTML = hl(text.slice(0, nch)) + '<span class="cursor"></span>';
+  }
+  const target = rowsEl[li].offsetTop - codeBox.clientHeight * 0.38;
+  scrollY += (target - scrollY) * 0.12;
+  pre.style.transform = `translateY(${-scrollY.toFixed(1)}px)`;
+}
+
+// ── цикл: физика 30 раз в секунду, отрисовка — каждый кадр ──
+
+const hudT = document.getElementById('hudT'), hudL = document.getElementById('hudL');
+const fpsEl = document.getElementById('fps'), pauseBtn = document.getElementById('pause');
+let paused = false, clock = 0, lastNow = performance.now(), fps = 60, acc = 0, spawnAcc = 0, smokeAcc = 0;
+
+function reset() {
+  clock = 0; scrollY = 0; heat.fill(0); sparks.length = 0; smoke.length = 0; flare = 0;
+}
+
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.1, (now - lastNow) / 1000)); lastNow = now;
+  fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  if (!paused) {
+    clock += dt; acc += dt;
+    const I = Math.min(1.3, smooth((clock - IGNITE[0]) / (IGNITE[1] - IGNITE[0])) + flare * 0.4);
+    const wind = Math.sin(clock * 0.21) * 0.35 + Math.sin(clock * 0.53) * 0.15;
+    while (acc > 1 / 30) { fireStep(I, wind, clock); acc -= 1 / 30; }
+    spawnAcc += dt * 26 * I; while (spawnAcc > 1) { spawnSpark(I); spawnAcc--; }
+    smokeAcc += dt * 9 * I; while (smokeAcc > 1) { spawnSmoke(); smokeAcc--; }
+    updateParticles(dt, clock, wind);
+    flare *= Math.pow(0.25, dt);
+  }
+  const I = Math.min(1.3, smooth((clock - IGNITE[0]) / (IGNITE[1] - IGNITE[0])) + flare * 0.4);
+  render(clock, I);
+  code(clock % CODE_LOOP);
+  hudT.innerHTML = `<b></b>t ${clock.toFixed(2)}s`;
+  hudL.textContent = `ascii campfire · 2026\nheat ${String(stats.heat).padStart(3, ' ')}%   sparks ${stats.sparks}\nletters ${stats.letters.toLocaleString('en')}`;
+  fpsEl.textContent = paused ? 'paused' : `running · ${Math.round(fps)} fps`;
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('stage').addEventListener('click', e => {
+  if (e.target.id === 'replay') { reset(); paused = false; pauseBtn.textContent = '⏸'; return; }
+  if (e.target.id === 'pause') { paused = !paused; pauseBtn.textContent = paused ? '▶' : '⏸'; return; }
+  if (paused || clock < IGNITE[0]) return;
+  flare = 1;                                   // подбросили дров — вспышка и сноп искр
+  for (let i = 0; i < 45; i++) spawnSpark(1, 1);
+  try { window.Telegram.WebApp.HapticFeedback.impactOccurred('light'); } catch (e) {}
+});
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+
+// Telegram Mini App: на весь экран, чёрная шапка
+try {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+  }
+} catch (e) {}
+</script>
+</body>
+</html>

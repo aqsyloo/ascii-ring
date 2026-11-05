@@ -1,5 +1,6 @@
-# ASCII-кольцо
+# ASCII-анимации
 
-3D-кольцо с бриллиантом, нарисованное буквами (canvas + JS). Работает как Telegram Mini App.
+Telegram Mini App, буквы на canvas + JS.
 
-Сайт: https://aqsyloo.github.io/ascii-ring/
+- Кольцо: https://aqsyloo.github.io/ascii-ring/
+- Костёр: https://aqsyloo.github.io/ascii-ring/fire/
