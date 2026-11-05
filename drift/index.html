@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ASCII-дрифт</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;color:#bbb}
+  #app{position:relative;height:100%;width:min(100vw,62vh);margin:0 auto;display:flex;flex-direction:column;background:#000}
+  #stage{position:relative;flex:0 0 61%;overflow:hidden;cursor:pointer;touch-action:manipulation}
+  #cv{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hud{position:absolute;font-size:11px;line-height:1.55;color:#7d8590;pointer-events:none;white-space:pre}
+  #hudL{left:6%;bottom:2.5%}
+  #hudT{right:4%;top:11%;color:#ff5d6c}
+  #hudT b{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff3b4f;margin-right:6px;vertical-align:1px}
+  .btns{position:absolute;left:4%;top:3%;display:flex;gap:6px}
+  .btns button{background:none;border:1px solid #2a2f36;color:#7d8590;font:inherit;font-size:11px;
+    padding:3px 8px;border-radius:4px;cursor:pointer}
+  .btns button:hover{color:#ddd;border-color:#4a525c}
+  #hint{position:absolute;right:4%;top:3%;font-size:10px;color:#4a525c;pointer-events:none}
+  #bar{display:flex;justify-content:space-between;font-size:12px;color:#ddd;padding:6px 3.5%;border-bottom:1px solid #16191d}
+  #bar span:last-child{color:#888}
+  #code{position:relative;flex:1;overflow:hidden;font-size:clamp(10px,3.3vw,15px);line-height:1.6;
+    -webkit-mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%);mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%)}
+  #pre{position:absolute;left:0;right:0;top:0;margin:0;will-change:transform}
+  .ln{display:flex;white-space:pre;border-left:3px solid transparent}
+  .ln i{font-style:normal;color:#33383e;width:3.2em;text-align:right;padding-right:1.4em;flex:none}
+  .ln.cur{background:#160d10;border-left-color:#ff5d6c}
+  .ln.cur i{color:#777}
+  .k{color:#ff7a90}.f{color:#82aaff}.n{color:#f6c177}.s{color:#c3e88d}.c{color:#5a5f66}
+  .cursor{display:inline-block;width:.6em;height:1.1em;vertical-align:-.2em;background:#ff5d6c;animation:bl 1s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="btns"><button id="replay">↻ заново</button><button id="pause">⏸</button></div>
+    <div id="hint">тап — газ в пол</div>
+    <div class="hud" id="hudT"><b></b>t 0.00s</div>
+    <div class="hud" id="hudL"></div>
+  </div>
+  <div id="bar"><span>$ node drift.js</span><span id="fps">running · 60 fps</span></div>
+  <div id="code"><div id="pre"></div></div>
+</div>
+
+<script id="src">
+// ── drift.js — купе в заносе по кругу: дым из-под задних колёс и следы шин ──
+
+const TAU = Math.PI * 2;
+const BODY = 0, GLASS = 1, TIRE = 2, RIM = 3, HEAD = 4, TAIL = 5;
+
+function rng(seed) {                          // детерминированный генератор
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand = rng(5);
+const car = [];                               // точки кузова в координатах машины
+const wheels = [];                            // точки колёс отдельно: они крутятся
+
+function add(arr, x, y, z, nx, ny, nz, kind, extra) {
+  const l = Math.hypot(nx, ny, nz) || 1;
+  arr.push(Object.assign({ x, y, z, nx: nx / l, ny: ny / l, nz: nz / l, kind, h: rand() }, extra));
+}
+
+// ── кузов: сечения-суперэллипсы вдоль длины (x — вперёд, z — вбок) ──
+
+const L = 2.3;                                // полудлина
+const halfW = x => 0.92 - 0.1 * Math.pow(Math.abs(x) / L, 6) - (x > 1.7 ? (x - 1.7) * 0.25 : 0);
+const deck = x => {                            // линия капота и багажника
+  if (x > 1.2) return 0.86 - (x - 1.2) * 0.22;        // нос опущен
+  if (x < -1.6) return 0.92 - (-1.6 - x) * 0.12;      // корма
+  return 0.9;
+};
+const roof = x => {                           // крыша: лобовое, крыша, фастбэк
+  if (x > 0.75 || x < -1.55) return 0;
+  if (x > 0.05) return 0.9 + 0.5 * (1 - Math.pow((x - 0.05) / 0.7, 1.6));
+  return 0.9 + 0.5 * (1 - Math.pow((0.05 - x) / 1.6, 2.2));
+};
+
+function sectionPoint(yc, hy, hz, th, n) {    // точка и нормаль суперэллипса
+  const c = Math.cos(th), s = Math.sin(th);
+  const y = yc + hy * Math.sign(s) * Math.pow(Math.abs(s), 2 / n);
+  const z = hz * Math.sign(c) * Math.pow(Math.abs(c), 2 / n);
+  const ny = Math.sign(s) * Math.pow(Math.abs((y - yc) / hy), n - 1) / hy;
+  const nz = Math.sign(c) * Math.pow(Math.abs(z / hz), n - 1) / hz;
+  return [y, z, ny, nz];
+}
+
+function body() {
+  for (let i = 0; i <= 190; i++) {
+    const x = -L + i / 190 * 2 * L, w = halfW(x), tp = deck(x), bot = 0.3;
+    for (let j = 0; j < 52; j++) {
+      const th = j / 52 * TAU;
+      const [y, z, ny, nz] = sectionPoint((tp + bot) / 2, (tp - bot) / 2, w, th, 5);
+      if (y < bot + 0.02 && Math.abs(z) < w - 0.05) continue;          // днище не видно
+      // арки колёс: вырезаем полукруги по бокам
+      const arch = Math.min(Math.hypot(x - 1.45, y - 0.36), Math.hypot(x + 1.45, y - 0.36));
+      if (arch < 0.45 && Math.abs(z) > w - 0.25) continue;
+      add(car, x, y, z, Math.sign(x) * Math.pow(Math.abs(x) / L, 8) * 2, ny, nz, BODY);
+    }
+  }
+  for (let i = 0; i < 900; i++) {             // торцы: решётка спереди, панель сзади
+    const sg = i % 2 ? 1 : -1, x = sg * L, w = halfW(x) * 0.97, tp = deck(x);
+    const z = (rand() * 2 - 1) * w, y = 0.32 + rand() * (tp - 0.34);
+    add(car, x, y, z, sg, 0, 0, BODY);
+  }
+  for (let i = 0; i <= 120; i++) {            // салон
+    const x = -1.55 + i / 120 * 2.3, rf = roof(x);
+    if (rf < 0.95) continue;
+    const w = 0.74 - 0.1 * Math.abs(x + 0.4);
+    for (let j = 0; j < 40; j++) {
+      const th = j / 40 * Math.PI;           // только верхняя половина сечения
+      const [y, z, ny, nz] = sectionPoint(0.9, rf - 0.9, w, th, 4);
+      const glass = y > 0.98 && y < rf - 0.09 && (Math.abs(z) > 0.25 || x > 0.15 || x < -1.0);
+      const slope = x > 0.05 ? 0.9 : -0.5;
+      add(car, x, y, z, slope * (y > 1.0 ? 0.6 : 0), ny, nz, glass ? GLASS : BODY);
+    }
+  }
+  for (let i = 0; i < 360; i++) {             // антикрыло-губа на багажнике
+    const z = (rand() * 2 - 1) * 0.8, x = -2.05 + rand() * 0.2;
+    add(car, x, deck(x) + 0.05, z, -0.3, 1, 0, BODY);
+  }
+  for (const sz of [-1, 1]) {                 // фары и фонари
+    for (let i = 0; i < 70; i++) {
+      add(car, L + 0.01, 0.66 + rand() * 0.1, sz * (0.5 + rand() * 0.28), 1, 0.1, 0, HEAD);
+      add(car, -L - 0.01, 0.74 + rand() * 0.06, sz * (0.25 + rand() * 0.6), -1, 0, 0, TAIL);
+    }
+  }
+}
+
+function wheel(cx, cz) {
+  const r = 0.36, half = 0.15, side = Math.sign(cz);
+  for (let i = 0; i < 90; i++) {              // протектор
+    const a = i / 90 * TAU;
+    for (let j = 0; j < 8; j++) {
+      const z = cz + (j / 7 * 2 - 1) * half;
+      add(wheels, cx + Math.cos(a) * r, 0.36 + Math.sin(a) * r, z, Math.cos(a), Math.sin(a), 0, TIRE,
+          { wx: cx, wz: cz, a, rr: r, tread: (i + j) % 3 === 0 });
+    }
+  }
+  for (let i = 0; i < 520; i++) {             // диск: 5 спиц на внешней стороне
+    const a = rand() * TAU, q = Math.sqrt(rand()) * r * 0.82;
+    const spoke = Math.abs(Math.sin(a * 2.5)) < 0.32 || q > r * 0.68 || q < r * 0.18;
+    if (!spoke) continue;
+    add(wheels, cx + Math.cos(a) * q, 0.36 + Math.sin(a) * q, cz + side * half, 0, 0, side, RIM,
+        { wx: cx, wz: cz, a, rr: q });
+  }
+}
+
+body();
+for (const [x, z] of [[1.45, 0.84], [1.45, -0.84], [-1.45, 0.84], [-1.45, -0.84]]) wheel(x, z);
+for (const p of car) p.order = (L - p.x) / (2 * L);   // прорисовка от носа к корме
+for (const p of wheels) p.order = (L - p.wx) / (2 * L);
+
+// ── движение: круг радиусом 6, нос смотрит внутрь — это и есть занос ──
+
+const CIRCLE = 6, SPEED = 9;                  // м и м/с
+const smooth = x => (x = Math.min(1, Math.max(0, x)), x * x * (3 - 2 * x));
+let boost = 0;
+
+function carState(t) {
+  const phi = t * SPEED / CIRCLE;
+  const P = [CIRCLE * Math.cos(phi), CIRCLE * Math.sin(phi)];
+  const v = [-Math.sin(phi), Math.cos(phi)], inn = [-Math.cos(phi), -Math.sin(phi)];
+  const beta = (34 + 6 * Math.sin(t * 0.9) + 14 * boost) * Math.PI / 180;   // угол заноса
+  const f = [v[0] * Math.cos(beta) + inn[0] * Math.sin(beta), v[1] * Math.cos(beta) + inn[1] * Math.sin(beta)];
+  const rg = [-f[1], f[0]];
+  const steer = -Math.atan2(v[0] * rg[0] + v[1] * rg[1], v[0] * f[0] + v[1] * f[1]) * 0.8;  // контрруль
+  const roll = 0.05 + 0.03 * boost;           // крен кузова наружу
+  return { phi, P, v, inn, f, rg, beta, steer, roll, spin: t * SPEED / 0.36 };
+}
+
+const toWorld = (S, lx, ly, lz) =>
+  [S.P[0] + S.f[0] * lx + S.rg[0] * lz, ly, S.P[1] + S.f[1] * lx + S.rg[1] * lz];
+
+// ── камера: едет рядом с машиной снаружи круга и чуть сверху ──
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const glow1 = document.createElement('canvas'), glow2 = document.createElement('canvas');
+let W, H, DPR, cw, chh, cols, rows, s, cx, cy, cam;
+let zb, bb, cb, kb, sd;
+const TILT = 0.5, DIST = 11;
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  glow1.width = cv.width >> 2; glow1.height = cv.height >> 2;
+  glow2.width = cv.width >> 3; glow2.height = cv.height >> 3;
+  cols = 88; cw = W / cols; chh = cw * 1.55; rows = Math.ceil(H / chh);
+  s = Math.min(W * 0.15, H * 0.2); cx = W / 2; cy = H * 0.47;
+  const n = cols * rows;
+  zb = new Float32Array(n); bb = new Float32Array(n); cb = new Array(n); kb = new Int8Array(n); sd = new Float32Array(n);
+}
+
+function setCamera(S, t) {
+  const a = 0.7 + 0.3 * Math.sin(t * 0.11);           // камера плавно гуляет
+  const out = [-S.inn[0], -S.inn[1]];
+  const g = [-(out[0] * Math.cos(a) - out[1] * Math.sin(a)), -(out[0] * Math.sin(a) + out[1] * Math.cos(a))];
+  cam = { T: [S.P[0] + S.v[0] * 0.4, 0.6, S.P[1] + S.v[1] * 0.4], g, r: [-g[1], g[0]] };
+}
+function project(x, y, z) {
+  const dx = x - cam.T[0], dy = y - cam.T[1], dz = z - cam.T[2];
+  const xv = dx * cam.r[0] + dz * cam.r[1], zv = -(dx * cam.g[0] + dz * cam.g[1]);
+  const yr = dy * Math.cos(TILT) - zv * Math.sin(TILT), zt = dy * Math.sin(TILT) + zv * Math.cos(TILT);
+  const f = DIST / (DIST - zt);
+  return [cx + xv * s * f, cy - yr * s * f, zt, f];
+}
+const viewN = (nx, ny, nz) => {               // нормаль мира → камера
+  const xv = nx * cam.r[0] + nz * cam.r[1], zv = -(nx * cam.g[0] + nz * cam.g[1]);
+  return [xv, ny * Math.cos(TILT) - zv * Math.sin(TILT), ny * Math.sin(TILT) + zv * Math.cos(TILT)];
+};
+
+// ── дым и следы шин ──
+
+const smoke = [], skids = [];
+let smokeAcc = 0, skidAcc = 0;
+
+function emit(S, dt, t) {
+  const on = smooth((t - 1.6) / 1.2);
+  smokeAcc += dt * (90 + 110 * boost) * on;
+  while (smokeAcc > 1) {
+    smokeAcc--;
+    const side = rand() < 0.5 ? 0.84 : -0.84;
+    const [x, , z] = toWorld(S, -1.45 + (rand() - .5) * 0.4, 0, side + (rand() - .5) * 0.3);
+    smoke.push({ x, y: 0.15, z, vx: S.v[0] * SPEED * 0.75 + (rand() - .5) * 3, vy: 0.08 + rand() * 0.3,
+                 vz: S.v[1] * SPEED * 0.75 + (rand() - .5) * 3, life: 0, max: 1.6 + rand() * 1.4, r0: 0.25 + rand() * 0.2 });
+  }
+  skidAcc += dt * on;
+  while (skidAcc > 0.035) {
+    skidAcc -= 0.035;
+    for (const side of [0.84, -0.84]) {
+      const [x, , z] = toWorld(S, -1.45, 0, side);
+      skids.push({ x, z, life: 0 });
+    }
+  }
+  for (const p of smoke) {
+    p.life += dt; const drag = 1 - 1.1 * dt;
+    p.vx *= drag; p.vz *= drag; p.vy *= 1 - 0.3 * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+  }
+  for (const p of skids) p.life += dt;
+  for (let i = smoke.length - 1; i >= 0; i--) if (smoke[i].life > smoke[i].max) smoke.splice(i, 1);
+  while (skids.length && skids[0].life > 9) skids.shift();
+}
+
+// ── буквы ──
+
+const RAMP = [' ', '.', '.,:', ':;-', '-=~+', '+<>()=', 'tjf[]{}?', 'aeozsu?', '0O%&e', '@$#&', '@$#'];
+const glyph = (b, h) => { const s = RAMP[Math.min(10, Math.floor(b * 9))]; return s[(h * s.length) | 0]; };
+const SMOKE = ' .,:;~-=+()oO';
+function edgeGlyph(nx, ny) {
+  if (Math.abs(nx) > 2.2 * Math.abs(ny)) return '|';
+  if (Math.abs(ny) > 2.2 * Math.abs(nx)) return ny < 0 ? '_' : '-';
+  return nx * ny > 0 ? '\\' : '/';
+}
+
+// ── рендер ──
+
+const stats = { smoke: 0, letters: 0 };
+const KEY = (() => { const v = [0.3, 0.9, 0.35], l = Math.hypot(...v); return v.map(c => c / l); })();
+
+function render(t, S) {
+  zb.fill(-1e9); kb.fill(-1); sd.fill(0);
+  const head = (t - 0.3) / 1.6 * 1.05;
+  const ct = Math.cos(S.roll), st = Math.sin(S.roll);
+
+  const plot = (p, lx, ly, lz, nx, ny, nz) => {
+    const k = smooth((head - p.order) / 0.08); if (k <= 0) return;
+    // крен: поворачиваем вокруг продольной оси
+    const y2 = (ly - 0.3) * ct - lz * st + 0.3, z2 = (ly - 0.3) * st + lz * ct;
+    const ny2 = ny * ct - nz * st, nz2 = ny * st + nz * ct;
+    const [wx, wy, wz] = toWorld(S, lx, y2, z2);
+    const [sx, sy, z] = project(wx, wy, wz);
+    const c = (sx / cw) | 0, r = (sy / chh) | 0;
+    if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+    const idx = r * cols + c;
+    if (z <= zb[idx]) return;
+    zb[idx] = z;
+    const wnx = S.f[0] * nx + S.rg[0] * nz2, wnz = S.f[1] * nx + S.rg[1] * nz2;
+    const [vx, vy, vz] = viewN(wnx, ny2, wnz);
+    const diff = Math.max(0, wnx * KEY[0] + ny2 * KEY[1] + wnz * KEY[2]);
+    const refl = Math.pow(Math.max(0, vy * 0.6 + vz * 0.8), 14);          // блик-отражение неба
+    const rim = Math.pow(1 - Math.abs(vz), 3);
+    let b;
+    switch (p.kind) {
+      case GLASS: b = 0.18 + 0.9 * refl + 0.2 * rim; break;
+      case TIRE: b = 0.22 + 0.35 * diff + (p.tread ? 0.15 : 0); break;
+      case RIM: b = 0.55 + 0.45 * diff + 0.8 * refl; break;
+      case HEAD: b = 1.3; break;
+      case TAIL: b = 1.1; break;
+      default: b = (0.3 + 0.5 * diff + 0.85 * refl + 0.35 * rim) * (0.85 + 0.25 * p.h);
+    }
+    b *= k;
+    bb[idx] = b; kb[idx] = p.kind;
+    cb[idx] = (k > 0.98 && Math.abs(vz) < 0.25 && p.kind === BODY) ? edgeGlyph(vx, vy)
+            : p.kind === TIRE ? (p.tread ? '#' : '=') : glyph(Math.min(1.1, b), p.h);
+  };
+
+  for (const p of car) plot(p, p.x, p.y, p.z, p.nx, p.ny, p.nz);
+  for (const p of wheels) {                    // колесо: вращение + поворот передних
+    const front = p.wx > 0, d = front ? S.steer : 0;
+    const a = p.a - S.spin * (p.kind === TIRE || p.kind === RIM ? 1 : 0);
+    let ox = Math.cos(a) * p.rr, oy = Math.sin(a) * p.rr, oz = p.z - p.wz;
+    let nx = p.kind === TIRE ? Math.cos(a) : 0, ny = p.kind === TIRE ? Math.sin(a) : 0, nz = p.nz;
+    const cd = Math.cos(d), sdd = Math.sin(d);
+    const rx = ox * cd - oz * sdd, rz = ox * sdd + oz * cd;
+    const rnx = nx * cd - nz * sdd, rnz = nx * sdd + nz * cd;
+    plot(p, p.wx + rx, 0.36 + oy, p.wz + rz, rnx, ny, rnz);
+  }
+
+  // дым: копим плотность по клеткам, учитывая глубину машины
+  for (const p of smoke) {
+    const k = p.life / p.max, R = p.r0 + Math.sqrt(k) * 1.7;
+    const [sx, sy, z, f] = project(p.x, p.y + R * 0.25, p.z);
+    const rc = R * s * f / cw, rr = R * s * f / chh * 0.8;
+    const al = Math.sin(Math.PI * Math.min(1, k * 1.6 + 0.05)) * Math.pow(1 - k, 0.7) * 0.24;
+    const c0 = sx / cw, r0 = sy / chh;
+    for (let r = Math.max(0, Math.floor(r0 - rr)); r <= Math.min(rows - 1, r0 + rr); r++)
+      for (let c = Math.max(0, Math.floor(c0 - rc)); c <= Math.min(cols - 1, c0 + rc); c++) {
+        const dx = (c - c0) / rc, dy = (r - r0) / rr, d2 = dx * dx + dy * dy;
+        if (d2 > 1) continue;
+        const idx = r * cols + c;
+        if (zb[idx] > z + 0.3) continue;      // машина ближе — дым за ней
+        sd[idx] += al * (1 - d2) * (1 - d2);
+      }
+  }
+  stats.smoke = smoke.length;
+  draw(t, S);
+}
+
+function draw(t, S) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  ctx.font = `${Math.min(chh * 0.95, cw / 0.6).toFixed(2)}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  const put = (c, r, ch, rgb, al) => {
+    if (al < 0.01 || c < 0 || c >= cols || r < 0 || r >= rows) return;
+    ctx.fillStyle = `rgba(${rgb[0] | 0},${rgb[1] | 0},${rgb[2] | 0},${Math.min(1, al).toFixed(3)})`;
+    ctx.fillText(ch, c * cw + cw / 2, r * chh);
+  };
+
+  // асфальт: сетка точек, привязанная к миру, + свет фар
+  const [hx, , hz] = toWorld(S, L, 0, 0);
+  const step = 0.42, gx0 = Math.floor((S.P[0] - 10) / step), gz0 = Math.floor((S.P[1] - 10) / step);
+  for (let i = 0; i < 48; i++) for (let j = 0; j < 48; j++) {
+    const x = (gx0 + i) * step, z = (gz0 + j) * step;
+    const [sx, sy, zz] = project(x, 0, z);
+    const c = (sx / cw) | 0, r = (sy / chh) | 0;
+    if (c < 0 || c >= cols || r < 0 || r >= rows || zb[r * cols + c] > -1e8) continue;
+    const dx = x - hx, dz = z - hz, along = dx * S.f[0] + dz * S.f[1], lat = Math.abs(dx * S.rg[0] + dz * S.rg[1]);
+    let beam = 0;
+    if (along > 0) { const cone = 0.5 + along * 0.42; if (lat < cone) beam = (1 - lat / cone) * Math.exp(-along / 6); }
+    const hsh = Math.abs(Math.sin((gx0 + i) * 12.99 + (gz0 + j) * 78.23)) % 1;
+    const fog = Math.max(0, 1 - Math.hypot(x - S.P[0], z - S.P[1]) / 10);
+    const b = 0.05 + 0.08 * hsh + beam * 0.9;
+    put(c, r, beam > 0.15 ? '.,:'[(hsh * 3) | 0] : '.', [200 + 55 * beam, 205 + 40 * beam, 215], b * fog);
+  }
+  // разметка круга
+  for (let i = 0; i < 160; i++) {
+    const a = i / 160 * TAU, [sx, sy] = project(Math.cos(a) * 4.4, 0, Math.sin(a) * 4.4);
+    if (i % 4 < 2) put((sx / cw) | 0, (sy / chh) | 0, '-', [230, 230, 240], 0.22);
+  }
+  // следы шин
+  for (let i = 0; i < skids.length; i++) {
+    const p = skids[i], [sx, sy] = project(p.x, 0, p.z);
+    const c = (sx / cw) | 0, r = (sy / chh) | 0;
+    if (c < 0 || c >= cols || r < 0 || r >= rows || zb[r * cols + c] > -1e8) continue;
+    put(c, r, '=', [150, 150, 160], 0.42 * (1 - p.life / 9));
+  }
+
+  // машина
+  let letters = 0;
+  const col = { 0: [235, 240, 250], 1: [150, 190, 255], 2: [170, 170, 175], 3: [255, 255, 255], 4: [255, 250, 225], 5: [255, 40, 60] };
+  const lights = [];
+  for (let i = 0; i < cols * rows; i++) {
+    if (zb[i] < -1e8) continue;
+    const ch = cb[i]; if (ch === ' ') continue;
+    const k = kb[i], b = bb[i], c0 = col[k];
+    put(i % cols, (i / cols) | 0, ch, c0, Math.min(1, 0.12 + b * 0.88));
+    if ((k === HEAD || k === TAIL) && b > 1) lights.push(i);
+    letters++;
+  }
+  // лучики от фар
+  const pulse = 0.6 + 0.4 * Math.sin(t * 7);
+  for (const i of lights.filter((_, j) => j % 9 === 0)) {
+    const c = i % cols, r = (i / cols) | 0, tail = kb[i] === TAIL;
+    const rgb = tail ? [255, 50, 70] : [255, 250, 230];
+    for (let q = 1; q <= 4; q++) {
+      put(c - q * 2, r, '-', rgb, 0.5 * pulse * (1 - q / 5)); put(c + q * 2, r, '-', rgb, 0.5 * pulse * (1 - q / 5));
+    }
+  }
+
+  // дым поверх
+  for (let i = 0; i < cols * rows; i++) {
+    const d = sd[i]; if (d < 0.04) continue;
+    const c = i % cols, r = (i / cols) | 0, f = Math.floor(t * 8);
+    const ch = SMOKE[Math.min(SMOKE.length - 1, Math.floor(Math.min(1, d * 0.7) * (SMOKE.length - 1) * (0.7 + 0.6 * (Math.abs(Math.sin(c * 12.9898 + r * 78.233 + f * 3.1) * 43758.5) % 1))))];
+    put(c, r, ch, [200, 204, 212], Math.min(0.55, d * 0.9));
+    letters++;
+  }
+  stats.letters = letters;
+
+  // свечение
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const g1 = glow1.getContext('2d'), g2 = glow2.getContext('2d');
+  g1.clearRect(0, 0, glow1.width, glow1.height); g1.drawImage(cv, 0, 0, glow1.width, glow1.height);
+  g2.clearRect(0, 0, glow2.width, glow2.height); g2.drawImage(glow1, 0, 0, glow2.width, glow2.height);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.5; ctx.drawImage(glow1, 0, 0, cv.width, cv.height);
+  ctx.globalAlpha = 0.45; ctx.drawImage(glow2, 0, 0, cv.width, cv.height);
+}
+
+// ── панель кода: показывает этот самый файл и «печатает» текущую строку ──
+
+const SRC = document.getElementById('src').textContent.replace(/^\n+|\s+$/g, '').split('\n');
+const KW = /^(const|let|var|function|return|for|if|else|of|new|while|continue|break|true|false|null)$/;
+function hl(line) {
+  const esc = x => x.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const re = /(\/\/.*$)|('(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(line))) {
+    out += esc(line.slice(last, m.index));
+    const tok = esc(m[0]);
+    if (m[1]) out += `<span class="c">${tok}</span>`;
+    else if (m[2]) out += `<span class="s">${tok}</span>`;
+    else if (m[3]) out += `<span class="n">${tok}</span>`;
+    else if (KW.test(m[4])) out += `<span class="k">${tok}</span>`;
+    else if (line[re.lastIndex] === '(') out += `<span class="f">${tok}</span>`;
+    else out += tok;
+    last = re.lastIndex;
+  }
+  return out + esc(line.slice(last));
+}
+const pre = document.getElementById('pre'), codeBox = document.getElementById('code');
+const rowsEl = SRC.map((l, i) => {
+  const d = document.createElement('div'); d.className = 'ln';
+  d.innerHTML = `<i>${i + 1}</i><span>${hl(l) || ' '}</span>`;
+  pre.appendChild(d); return d;
+});
+const LINES_PER_S = 7, CODE_LOOP = SRC.length / LINES_PER_S + 6;
+let curLine = -1, curChars = -1, scrollY = 0;
+
+function code(t) {
+  const pos = Math.min(SRC.length - 1e-3, t * LINES_PER_S);
+  const li = Math.floor(pos), text = SRC[li];
+  const nch = Math.floor((pos - li) * 1.4 * text.length);
+  if (li !== curLine) {
+    if (curLine >= 0 && rowsEl[curLine]) {
+      rowsEl[curLine].classList.remove('cur');
+      rowsEl[curLine].lastChild.innerHTML = hl(SRC[curLine]) || ' ';
+    }
+    curLine = li; curChars = -1; rowsEl[li].classList.add('cur');
+  }
+  if (nch !== curChars) {
+    curChars = nch;
+    rowsEl[li].lastChild.innerHTML = hl(text.slice(0, nch)) + '<span class="cursor"></span>';
+  }
+  const target = rowsEl[li].offsetTop - codeBox.clientHeight * 0.38;
+  scrollY += (target - scrollY) * 0.12;
+  pre.style.transform = `translateY(${-scrollY.toFixed(1)}px)`;
+}
+
+// ── цикл анимации ──
+
+const hudT = document.getElementById('hudT'), hudL = document.getElementById('hudL');
+const fpsEl = document.getElementById('fps'), pauseBtn = document.getElementById('pause');
+let paused = false, clock = 0, lastNow = performance.now(), fps = 60;
+
+function reset() { clock = 0; scrollY = 0; smoke.length = 0; skids.length = 0; boost = 0; }
+
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.1, (now - lastNow) / 1000)); lastNow = now;
+  fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  if (!paused) { clock += dt; boost *= Math.pow(0.35, dt); }
+  const S = carState(clock);
+  setCamera(S, clock);
+  if (!paused) emit(S, dt, clock);
+  render(clock, S);
+  code(clock % CODE_LOOP);
+  hudT.innerHTML = `<b></b>t ${clock.toFixed(2)}s`;
+  const kmh = SPEED * 3.6 * (1 + 0.25 * boost);
+  hudL.textContent = `ascii drift · 2026\nangle ${(S.beta * 180 / Math.PI).toFixed(1)}°   speed ${kmh.toFixed(0)} km/h\nsmoke ${stats.smoke}   letters ${stats.letters.toLocaleString('en')}`;
+  fpsEl.textContent = paused ? 'paused' : `running · ${Math.round(fps)} fps`;
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('stage').addEventListener('click', e => {
+  if (e.target.id === 'replay') { reset(); paused = false; pauseBtn.textContent = '⏸'; return; }
+  if (e.target.id === 'pause') { paused = !paused; pauseBtn.textContent = paused ? '▶' : '⏸'; return; }
+  if (paused) return;
+  boost = 1;                                   // газ в пол — угол больше, дыма больше
+  try { window.Telegram.WebApp.HapticFeedback.impactOccurred('medium'); } catch (e) {}
+});
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+
+// Telegram Mini App: на весь экран, чёрная шапка
+try {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+  }
+} catch (e) {}
+</script>
+</body>
+</html>
