@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ASCII-терминал</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;color:#bbb}
+  #app{position:relative;height:100%;width:min(100vw,62vh);margin:0 auto;display:flex;flex-direction:column;background:#000}
+  #stage{position:relative;flex:0 0 61%;overflow:hidden;cursor:pointer;touch-action:manipulation}
+  #cv{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hud{position:absolute;font-size:11px;line-height:1.55;color:#7d8590;pointer-events:none;white-space:pre}
+  #hudL{left:6%;bottom:2.5%}
+  #hudT{right:4%;top:11%;color:#ff5d6c}
+  #hudT b{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff3b4f;margin-right:6px;vertical-align:1px}
+  .btns{position:absolute;left:4%;top:3%;display:flex;gap:6px}
+  .btns button{background:none;border:1px solid #2a2f36;color:#7d8590;font:inherit;font-size:11px;
+    padding:3px 8px;border-radius:4px;cursor:pointer}
+  .btns button:hover{color:#ddd;border-color:#4a525c}
+  #hint{position:absolute;right:4%;top:3%;font-size:10px;color:#4a525c;pointer-events:none}
+  #bar{display:flex;justify-content:space-between;font-size:12px;color:#ddd;padding:6px 3.5%;border-bottom:1px solid #16191d}
+  #bar span:last-child{color:#888}
+  #code{position:relative;flex:1;overflow:hidden;font-size:clamp(10px,3.3vw,15px);line-height:1.6;
+    -webkit-mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%);mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%)}
+  #pre{position:absolute;left:0;right:0;top:0;margin:0;will-change:transform}
+  .ln{display:flex;white-space:pre;border-left:3px solid transparent}
+  .ln i{font-style:normal;color:#33383e;width:3.2em;text-align:right;padding-right:1.4em;flex:none}
+  .ln.cur{background:#160d10;border-left-color:#ff5d6c}
+  .ln.cur i{color:#777}
+  .k{color:#ff7a90}.f{color:#82aaff}.n{color:#f6c177}.s{color:#c3e88d}.c{color:#5a5f66}
+  .cursor{display:inline-block;width:.6em;height:1.1em;vertical-align:-.2em;background:#ff5d6c;animation:bl 1s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="btns"><button id="replay">↻ заново</button><button id="pause">⏸</button></div>
+    <div id="hint">тап — запустить атаку</div>
+    <div class="hud" id="hudT"><b></b>t 0.00s</div>
+    <div class="hud" id="hudL"></div>
+  </div>
+  <div id="bar"><span>$ node breach.js</span><span id="fps">running · 60 fps</span></div>
+  <div id="code"><div id="pre"></div></div>
+</div>
+
+<script id="src">
+
+// ── breach.js — кино-терминал «взлома»: всё вымышленное, только эффекты ──
+
+const TAU = Math.PI * 2;
+function rng(seed) {                          // детерминированный генератор
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rand = rng(1337);
+const smooth = x => (x = Math.min(1, Math.max(0, x)), x * x * (3 - 2 * x));
+const HEX = '0123456789ABCDEF';
+const hex = n => { let s = ''; while (n-- > 0) s += HEX[(rand() * 16) | 0]; return s; };
+const ip = () => `${(rand() * 223 + 1) | 0}.${(rand() * 256) | 0}.${(rand() * 256) | 0}.${(rand() * 256) | 0}`;
+
+// ── сетка символов ──
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const glow1 = document.createElement('canvas'), glow2 = document.createElement('canvas');
+let W, H, DPR, cw, chh, cols, rows, G, mapY, logY;
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  glow1.width = cv.width >> 2; glow1.height = cv.height >> 2;
+  glow2.width = cv.width >> 3; glow2.height = cv.height >> 3;
+  cols = 74; cw = W / cols; chh = cw * 1.5; rows = Math.ceil(H / chh);
+  G = { ch: new Array(cols * rows), fg: new Float32Array(cols * rows * 4) };
+  mapY = 3; logY = Math.round(rows * 0.5);
+  initRain(); buildMap();
+}
+function put(c, r, ch, rgb, a = 1) {
+  c = Math.round(c); r = Math.round(r); if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+  const i = r * cols + c;
+  if (a < (G.fg[i * 4 + 3] || 0) && G.ch[i] !== ' ' && G.ch[i] !== undefined) return;
+  G.ch[i] = ch; G.fg[i * 4] = rgb[0]; G.fg[i * 4 + 1] = rgb[1]; G.fg[i * 4 + 2] = rgb[2]; G.fg[i * 4 + 3] = a;
+}
+function text(c, r, s, rgb, a = 1) { for (let i = 0; i < s.length; i++) if (s[i] !== ' ') put(c + i, r, s[i], rgb, a); }
+const GREEN = [70, 255, 120], DIM = [40, 140, 70], AMBER = [255, 190, 60], RED = [255, 70, 70], WHITE = [230, 255, 235];
+
+// ── матричный дождь на фоне ──
+
+const MX = 'アイウカサ01<>[]{}#%&$/\\|=+*';
+let rain = [];
+function initRain() { rain = []; for (let c = 0; c < cols; c++) rain.push({ y: rand() * rows, sp: 6 + rand() * 16, len: 5 + (rand() * 12 | 0) }); }
+function drawRain(dt, intensity) {
+  for (let c = 0; c < cols; c++) {
+    const d = rain[c]; d.y += d.sp * dt * (0.4 + intensity);
+    if (d.y - d.len > rows) { d.y = -rand() * 10; d.sp = 6 + rand() * 16; d.len = 5 + (rand() * 12 | 0); }
+    for (let k = 0; k < d.len; k++) {
+      const r = Math.floor(d.y) - k; if (r < 0 || r >= rows) continue;
+      const head = k === 0;
+      put(c, r, MX[(c * 7 + r * 13 + (Date.now() / 90 | 0)) % MX.length],
+          head ? [180, 255, 200] : DIM, (head ? 0.7 : 0.18) * (1 - k / d.len) * (0.4 + intensity * 0.8));
+    }
+  }
+}
+
+// ── вымышленная карта мира из точек + дуги атак ──
+
+let MAP = [], nodes = [];
+function buildMap() {
+  // грубый силуэт материков в сетке 60x14 (1 — суша)
+  const art = [
+    "   ::::::      ::::::::::::::      ",
+    "  ::::::::::  ::::::::::::::::::::  ",
+    " :::::::::::::::::::  :::::::::::::::",
+    "  :::::::::::::::      ::::::::::::: ",
+    "    ::::::::::          ::::::::::   ",
+    "     ::::::              :::::::     ",
+    "      ::::      ::        :::::      ",
+    "       ::      ::::        :::       ",
+    "       ::       ::          ::       ",
+    "        :       ::           :       ",
+  ];
+  MAP = art;
+  nodes = []; const r2 = rng(7);
+  for (let i = 0; i < 7; i++) nodes.push({ x: 4 + r2() * 52, y: r2() * 9, t: r2() });
+}
+function drawMap(t, phase, lock) {
+  const ox = Math.round((cols - 60) / 2), oy = mapY;
+  for (let r = 0; r < MAP.length; r++) for (let c = 0; c < MAP[r].length; c++)
+    if (MAP[r][c] !== ' ') put(ox + c * 1.03, oy + r, (c + r) % 4 === 0 ? ':' : '·', [45, 170, 90], 0.55);
+  // пульсирующие узлы
+  for (const n of nodes) {
+    const p = (Math.sin(t * 3 + n.t * TAU) + 1) / 2;
+    put(ox + n.x, oy + n.y, 'o', GREEN, 0.5 + 0.5 * p);
+    put(ox + n.x, oy + n.y, p > 0.7 ? 'O' : 'o', GREEN, 0.5 + 0.5 * p);
+    for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) put(ox + n.x + dx, oy + n.y + dy, '.', GREEN, 0.25 * p);
+  }
+  // цель
+  const tg = nodes[2], tx = ox + tg.x, ty = oy + tg.y;
+  const col = lock ? RED : AMBER, blink = Math.sin(t * 9) > 0;
+  if (!lock || blink) { put(tx, ty, '◉', col, 1); put(tx - 2, ty, '[', col, 0.8); put(tx + 2, ty, ']', col, 0.8); put(tx, ty - 1, '^', col, 0.6); put(tx, ty + 1, 'v', col, 0.6); }
+  // дуги атак от «нас» (слева снизу) к цели
+  if (phase >= 2) {
+    const sx = ox + 2, sy = oy + 9;
+    for (let seg = 0; seg < 3; seg++) {
+      for (let i = 0; i <= 20; i++) {
+        const k = i / 20, x = sx + (tx - sx) * k, y = sy + (ty - sy) * k - Math.sin(k * Math.PI) * 4;
+        const on = (k * 20 - (t * 9 + seg * 7)) % 3;
+        if (on > 0 && on < 1.2) put(x, y, '*', [120, 255, 180], 0.8 * (1 - k * 0.3));
+      }
+    }
+  }
+}
+
+// ── прогресс-бары «взлома» вымышленных модулей ──
+
+const TASKS = [
+  { name: 'FIREWALL.SYS', t0: 2.0, t1: 6.5 },
+  { name: 'AES-256 VAULT', t0: 4.0, t1: 10.0 },
+  { name: 'MAINFRAME ROOT', t0: 7.0, t1: 13.5 },
+  { name: 'EXFIL /payload', t0: 11.0, t1: 16.5 },
+];
+function drawTasks(t, x0, y0) {
+  const bw = 26;
+  TASKS.forEach((task, i) => {
+    const y = y0 + i * 2, p = smooth((t - task.t0) / (task.t1 - task.t0));
+    if (t < task.t0) return;
+    const done = p >= 1;
+    text(x0, y, task.name.padEnd(16, ' '), done ? GREEN : WHITE, 0.95);
+    const n = Math.round(p * bw);
+    put(x0 + 17, y, '[', DIM, 0.8);
+    for (let k = 0; k < bw; k++) {
+      const c = x0 + 18 + k;
+      if (k < n) put(c, y, k === n - 1 && !done ? '▓' : '█', done ? GREEN : [90, 220, 255], 0.95);
+      else put(c, y, '·', DIM, 0.4);
+    }
+    put(x0 + 18 + bw, y, ']', DIM, 0.8);
+    text(x0 + 20 + bw, y, done ? ' OK ' : `${(p * 100 | 0).toString().padStart(3, ' ')}%`, done ? GREEN : AMBER, 1);
+    // мелькающие «подобранные» байты у активного бара
+    if (!done && p > 0) text(x0, y + 1, hex(2) + ' ' + hex(2) + ' ' + hex(2) + '  key=0x' + hex(6), DIM, 0.5);
+  });
+}
+
+// ── лог-поток снизу-слева ──
+
+let logLines = [], logAcc = 0;
+function pushLog(t) {
+  const r = rand();
+  let s, col = DIM;
+  if (r < 0.3) s = `[${hex(4)}] inject ${ip()}:${(rand() * 9999 | 0)} ... ok`;
+  else if (r < 0.5) s = `GET /node/${hex(3)} 200  ${hex(2)}:${hex(2)}:${hex(2)}`;
+  else if (r < 0.65) { s = `! WAF challenge ${hex(4)} bypass`; col = AMBER; }
+  else if (r < 0.75) { s = `+ shell opened @ ${ip()}`; col = GREEN; }
+  else s = hex(2) + ' ' + hex(2) + ' ' + hex(2) + ' ' + hex(2) + '  ' + hex(2) + ' ' + hex(2) + '  ....' + hex(4);
+  logLines.push({ s, col }); if (logLines.length > 9) logLines.shift();
+}
+function drawLog(x0, y0) {
+  logLines.forEach((l, i) => text(x0, y0 + i, l.s, l.col, 0.35 + 0.07 * i));
+}
+
+// ── баннер ACCESS GRANTED ──
+
+const BANNER = [
+  " ▄▀█ █▀▀ █▀▀ █▀▀ █▀ █▀   ",
+  " █▀█ █▄▄ █▄▄ ██▄ ▄█ ▄█   ",
+  " █▀▀ █▀▀ █▀█ █▄ █ ▀█▀ █▀▀ █▀▄ ",
+  " █▄█ █▀▄ █▀█ █ ▀█  █  ██▄ █▄▀ ",
+];
+function drawBanner(t, k) {                    // k: 0..1 появление
+  const txt = 'ACCESS GRANTED', x0 = Math.round(cols / 2 - txt.length * 1.5);
+  const flash = Math.sin(t * 20) > -0.3 ? 1 : 0.3;
+  // рамка
+  const y = Math.round(rows * 0.26), w = 34, bx = Math.round(cols / 2 - w / 2);
+  for (let c = bx; c <= bx + w; c++) { put(c, y - 2, '═', GREEN, k); put(c, y + 4, '═', GREEN, k); }
+  for (let r = y - 2; r <= y + 4; r++) { put(bx, r, '║', GREEN, k); put(bx + w, r, '║', GREEN, k); }
+  const big = ' A C C E S S   G R A N T E D ';
+  text(Math.round(cols / 2 - big.length / 2), y, big, [120, 255, 160], k * flash);
+  text(Math.round(cols / 2 - 13), y + 2, 'root@mainframe:~# _', GREEN, k * 0.9);
+  // осыпающиеся искры
+  if (k > 0.5) for (let i = 0; i < 6; i++) put(bx + rand() * w, y - 2 + rand() * 7, '*', [180, 255, 200], rand() * k);
+}
+
+// ── сборка кадра ──
+
+const LOOP = 20;
+const stats = { nodes: 0, speed: 1, letters: 0 };
+let turbo = 0;
+
+function render(t, dt) {
+  G.ch.fill(' '); G.fg.fill(0);
+  const tt = t % LOOP;
+  const phase = tt < 1.6 ? 0 : tt < 2 ? 1 : tt < 16.5 ? 2 : 3;
+  const lock = tt > 2;
+  const intensity = Math.min(1, (phase >= 2 ? 0.5 : 0.15) + turbo);
+
+  drawRain(dt, intensity);
+
+  // шапка
+  text(1, 0, '┌─ NEBULA-9 PENTEST SUITE ' + '─'.repeat(30) + ' [SIM] ┐', DIM, 0.7);
+  text(2, 1, 'target: ' + ip() + '   session: 0x' + hex(8), GREEN, 0.8);
+  text(cols - 16, 1, 'uplink ' + (18 + (Math.sin(t * 2) * 6 | 0)) + ' Mb/s', AMBER, 0.7);
+
+  // boot-печать
+  if (phase === 0) {
+    const boot = ['> initializing kernel modules...', '> loading exploit db (sim)...', '> probing target surface...', '> handshake 0x' + hex(4) + ' ok'];
+    const n = Math.floor(tt * 14);
+    boot.forEach((b, i) => { if (i * 12 < n) text(2, mapY + 1 + i, b.slice(0, n - i * 12), GREEN, 0.9); });
+  } else {
+    drawMap(t, phase, lock);
+    drawTasks(t, 3, logY);
+    // правая колонка: hex-дамп памяти
+    const hx = cols - 26;
+    text(hx, logY - 1, 'MEM 0x' + hex(6), DIM, 0.6);
+    for (let r = 0; r < 8; r++) text(hx, logY + r, hex(2) + ' ' + hex(2) + ' ' + hex(2) + ' ' + hex(2) + '  ' + String.fromCharCode(...[0, 0, 0, 0].map(() => 46 + (rand() * 40 | 0))), DIM, 0.4 + 0.04 * r);
+    drawLog(3, logY + 9);
+  }
+
+  // полоса статуса
+  const pct = Math.min(100, Math.max(0, Math.round(smooth((tt - 2) / 14.5) * 100)));
+  text(1, rows - 1, `[SIM] no real systems touched · breach ${pct}% ` + (lock ? '· TARGET LOCKED' : ''), lock ? RED : DIM, 0.7);
+
+  // ACCESS GRANTED в конце
+  if (tt > 16.5) drawBanner(t, smooth((tt - 16.7) / 0.6));
+
+  stats.nodes = nodes.length; stats.speed = (1 + turbo * 2).toFixed(1);
+  flush(turbo);
+  turbo *= Math.pow(0.1, dt);
+}
+
+function flush(shakeAmt) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const ox = shakeAmt > 0.05 ? (Math.random() - .5) * shakeAmt * 4 : 0;
+  ctx.font = `${Math.min(chh * 0.95, cw / 0.6).toFixed(2)}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  let n = 0;
+  for (let i = 0; i < cols * rows; i++) {
+    const a = G.fg[i * 4 + 3]; if (a <= 0.01 || G.ch[i] === ' ' || G.ch[i] === undefined) continue;
+    ctx.fillStyle = `rgba(${G.fg[i * 4] | 0},${G.fg[i * 4 + 1] | 0},${G.fg[i * 4 + 2] | 0},${Math.min(1, a).toFixed(3)})`;
+    ctx.fillText(G.ch[i], (i % cols) * cw + cw / 2 + ox, ((i / cols) | 0) * chh);
+    n++;
+  }
+  stats.letters = n;
+  // сканлайны ЭЛТ
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  for (let y = 0; y < cv.height; y += 3 * DPR) ctx.fillRect(0, y, cv.width, DPR);
+  const g1 = glow1.getContext('2d'), g2 = glow2.getContext('2d');
+  g1.clearRect(0, 0, glow1.width, glow1.height); g1.drawImage(cv, 0, 0, glow1.width, glow1.height);
+  g2.clearRect(0, 0, glow2.width, glow2.height); g2.drawImage(glow1, 0, 0, glow2.width, glow2.height);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.5; ctx.drawImage(glow1, 0, 0, cv.width, cv.height);
+  ctx.globalAlpha = 0.5; ctx.drawImage(glow2, 0, 0, cv.width, cv.height);
+}
+
+// ── панель кода: показывает этот самый файл и «печатает» текущую строку ──
+
+const SRC = document.getElementById('src').textContent.replace(/^\n+|\s+$/g, '').split('\n');
+const KW = /^(const|let|var|function|return|for|if|else|of|new|while|continue|break|true|false|null)$/;
+function hl(line) {
+  const esc = x => x.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const re = /(\/\/.*$)|('(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(line))) {
+    out += esc(line.slice(last, m.index));
+    const tok = esc(m[0]);
+    if (m[1]) out += `<span class="c">${tok}</span>`;
+    else if (m[2]) out += `<span class="s">${tok}</span>`;
+    else if (m[3]) out += `<span class="n">${tok}</span>`;
+    else if (KW.test(m[4])) out += `<span class="k">${tok}</span>`;
+    else if (line[re.lastIndex] === '(') out += `<span class="f">${tok}</span>`;
+    else out += tok;
+    last = re.lastIndex;
+  }
+  return out + esc(line.slice(last));
+}
+const pre = document.getElementById('pre'), codeBox = document.getElementById('code');
+const rowsEl = SRC.map((l, i) => {
+  const d = document.createElement('div'); d.className = 'ln';
+  d.innerHTML = `<i>${i + 1}</i><span>${hl(l) || ' '}</span>`;
+  pre.appendChild(d); return d;
+});
+const LINES_PER_S = 7, CODE_LOOP = SRC.length / LINES_PER_S + 6;
+let curLine = -1, curChars = -1, scrollY = 0;
+
+function code(t) {
+  const pos = Math.min(SRC.length - 1e-3, t * LINES_PER_S);
+  const li = Math.floor(pos), text = SRC[li];
+  const nch = Math.floor((pos - li) * 1.4 * text.length);
+  if (li !== curLine) {
+    if (curLine >= 0 && rowsEl[curLine]) {
+      rowsEl[curLine].classList.remove('cur');
+      rowsEl[curLine].lastChild.innerHTML = hl(SRC[curLine]) || ' ';
+    }
+    curLine = li; curChars = -1; rowsEl[li].classList.add('cur');
+  }
+  if (nch !== curChars) {
+    curChars = nch;
+    rowsEl[li].lastChild.innerHTML = hl(text.slice(0, nch)) + '<span class="cursor"></span>';
+  }
+  const target = rowsEl[li].offsetTop - codeBox.clientHeight * 0.38;
+  scrollY += (target - scrollY) * 0.12;
+  pre.style.transform = `translateY(${-scrollY.toFixed(1)}px)`;
+}
+
+// ── цикл анимации ──
+
+const hudT = document.getElementById('hudT'), hudL = document.getElementById('hudL');
+const fpsEl = document.getElementById('fps'), pauseBtn = document.getElementById('pause');
+let paused = false, clock = 0, lastNow = performance.now(), fps = 60, logAccum = 0;
+
+function reset() { clock = 0; scrollY = 0; turbo = 0; logLines = []; }
+
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.1, (now - lastNow) / 1000)); lastNow = now;
+  fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  if (!paused) {
+    clock += dt;
+    logAccum += dt * (6 + turbo * 20); while (logAccum > 1) { pushLog(clock); logAccum--; }
+  }
+  render(clock, paused ? 0 : dt);
+  code(clock % CODE_LOOP);
+  hudT.innerHTML = `<b></b>t ${clock.toFixed(2)}s`;
+  const tt = clock % LOOP, pct = Math.min(100, Math.max(0, Math.round(smooth((tt - 2) / 14.5) * 100)));
+  hudL.textContent = `ascii breach · 2026   [SIMULATION]\nnodes ${stats.nodes}   breach ${pct}%   x${stats.speed}\nletters ${stats.letters.toLocaleString('en')}`;
+  fpsEl.textContent = paused ? 'paused' : `running · ${Math.round(fps)} fps`;
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('stage').addEventListener('click', e => {
+  if (e.target.id === 'replay') { reset(); paused = false; pauseBtn.textContent = '⏸'; return; }
+  if (e.target.id === 'pause') { paused = !paused; pauseBtn.textContent = paused ? '▶' : '⏸'; return; }
+  if (paused) return;
+  turbo = 1;                                   // «ускорить атаку»: дождь гуще, лог быстрее, тряска
+  try { window.Telegram.WebApp.HapticFeedback.impactOccurred('rigid'); } catch (e) {}
+});
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+
+// Telegram Mini App: на весь экран, чёрная шапка
+try {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+  }
+} catch (e) {}
+</script>
+</body>
+</html>

@@ -9,3 +9,4 @@ Telegram Mini App, буквы на canvas + JS.
 - Метро: https://aqsyloo.github.io/ascii-ring/metro/
 - Аэропорт: https://aqsyloo.github.io/ascii-ring/airport/
 - Заправка: https://aqsyloo.github.io/ascii-ring/station/
+- Хакер-терминал (симуляция): https://aqsyloo.github.io/ascii-ring/hacker/
