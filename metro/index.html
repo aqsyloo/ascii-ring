@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ASCII-метро</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;color:#bbb}
+  #app{position:relative;height:100%;width:min(100vw,62vh);margin:0 auto;display:flex;flex-direction:column;background:#000}
+  #stage{position:relative;flex:0 0 61%;overflow:hidden;cursor:pointer;touch-action:manipulation}
+  #cv{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hud{position:absolute;font-size:11px;line-height:1.55;color:#7d8590;pointer-events:none;white-space:pre}
+  #hudL{left:6%;bottom:2.5%}
+  #hudT{right:4%;top:11%;color:#ff5d6c}
+  #hudT b{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff3b4f;margin-right:6px;vertical-align:1px}
+  .btns{position:absolute;left:4%;top:3%;display:flex;gap:6px}
+  .btns button{background:none;border:1px solid #2a2f36;color:#7d8590;font:inherit;font-size:11px;
+    padding:3px 8px;border-radius:4px;cursor:pointer}
+  .btns button:hover{color:#ddd;border-color:#4a525c}
+  #hint{position:absolute;right:4%;top:3%;font-size:10px;color:#4a525c;pointer-events:none}
+  #bar{display:flex;justify-content:space-between;font-size:12px;color:#ddd;padding:6px 3.5%;border-bottom:1px solid #16191d}
+  #bar span:last-child{color:#888}
+  #code{position:relative;flex:1;overflow:hidden;font-size:clamp(10px,3.3vw,15px);line-height:1.6;
+    -webkit-mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%);mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%)}
+  #pre{position:absolute;left:0;right:0;top:0;margin:0;will-change:transform}
+  .ln{display:flex;white-space:pre;border-left:3px solid transparent}
+  .ln i{font-style:normal;color:#33383e;width:3.2em;text-align:right;padding-right:1.4em;flex:none}
+  .ln.cur{background:#160d10;border-left-color:#ff5d6c}
+  .ln.cur i{color:#777}
+  .k{color:#ff7a90}.f{color:#82aaff}.n{color:#f6c177}.s{color:#c3e88d}.c{color:#5a5f66}
+  .cursor{display:inline-block;width:.6em;height:1.1em;vertical-align:-.2em;background:#ff5d6c;animation:bl 1s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="btns"><button id="replay">↻ заново</button><button id="pause">⏸</button></div>
+    <div id="hint">тап — гудок</div>
+    <div class="hud" id="hudT"><b></b>t 0.00s</div>
+    <div class="hud" id="hudL"></div>
+  </div>
+  <div id="bar"><span>$ node metro.js</span><span id="fps">running · 60 fps</span></div>
+  <div id="code"><div id="pre"></div></div>
+</div>
+
+<script id="src">
+
+// ── metro.js — станция метро из букв: поезд прибывает, двери, пассажиры, отправление ──
+
+const TAU = Math.PI * 2;
+function rng(seed) {                          // детерминированный генератор
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+let rand = rng(11);
+const smooth = x => (x = Math.min(1, Math.max(0, x)), x * x * (3 - 2 * x));
+const lerp = (a, b, k) => a + (b - a) * k;
+
+// ── сетка: у каждой клетки символ, цвет и фон ──
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const glow1 = document.createElement('canvas'), glow2 = document.createElement('canvas');
+let W, H, DPR, cw, chh, cols, rows, G;
+let L = {};                                   // разметка рядов сцены
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  glow1.width = cv.width >> 2; glow1.height = cv.height >> 2;
+  glow2.width = cv.width >> 3; glow2.height = cv.height >> 3;
+  cols = 80; cw = W / cols; chh = cw * 1.55; rows = Math.ceil(H / chh);
+  G = { ch: new Array(cols * rows), fg: new Float32Array(cols * rows * 4), bg: new Float32Array(cols * rows * 4) };
+  const tt = Math.round(rows * 0.4);
+  L = { ceil: 3, sign: Math.round(rows * 0.15), trainTop: tt, win: tt + 4, belt: tt + 10,
+        trainBot: tt + 14, rail: tt + 15, edge: tt + 16, floor: tt + 17 };
+}
+function clear() { G.ch.fill(' '); G.fg.fill(0); G.bg.fill(0); }
+function put(c, r, ch, rgb, a = 1) {
+  c = Math.round(c); if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+  const i = r * cols + c; G.ch[i] = ch;
+  G.fg[i * 4] = rgb[0]; G.fg[i * 4 + 1] = rgb[1]; G.fg[i * 4 + 2] = rgb[2]; G.fg[i * 4 + 3] = a;
+}
+function fill(c, r, rgb, a = 1) {
+  c = Math.round(c); if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+  const i = r * cols + c;
+  G.bg[i * 4] = rgb[0]; G.bg[i * 4 + 1] = rgb[1]; G.bg[i * 4 + 2] = rgb[2]; G.bg[i * 4 + 3] = a;
+}
+function text(c, r, str, rgb, a = 1) { for (let i = 0; i < str.length; i++) if (str[i] !== ' ') put(c + i, r, str[i], rgb, a); }
+
+// ── станция: свод, лампы, плитка, арки, табличка и часы ──
+
+const STATION = 'КОДОВАЯ', NEXT = 'ПИКСЕЛЬНАЯ';
+function station(t, glowR) {
+  for (let c = 0; c < cols; c++) {            // свод с лампами
+    put(c, 0, '_', [90, 90, 100], 0.6);
+    if (c % 10 === 5) {
+      put(c, 1, '|', [120, 120, 130], 0.7);
+      put(c, 2, '@', [255, 240, 200], 1); put(c - 1, 2, '(', [255, 230, 180], 0.8); put(c + 1, 2, ')', [255, 230, 180], 0.8);
+    }
+  }
+  for (let r = L.ceil; r < L.trainTop + 2; r++)  // путевая стена: плитка
+    for (let c = 0; c < cols; c++) {
+      const tile = (r % 2 === 0) ? ((c % 4 === 0) ? '|' : '_') : ((c % 4 === 2) ? '|' : ' ');
+      const lamp = 0.5 + 0.5 * Math.cos(((c % 10) - 5) / 5 * Math.PI);
+      if (tile !== ' ') put(c, r, tile, [150, 160, 175], 0.14 + 0.1 * lamp + glowR * Math.max(0, 1 - (cols - c) / 30) * 0.5);
+    }
+  for (let a = 0; a < 5; a++) {               // арки
+    const ac = a * 20 + 10;
+    for (let k = -8; k <= 8; k++) {
+      const yy = Math.round(L.ceil + 1 + (k * k) / 12);
+      put(ac + k, yy, k < -1 ? '/' : k > 1 ? '\\' : '_', [190, 195, 210], 0.45);
+    }
+  }
+  // табличка станции
+  const w = STATION.length + 6, c0 = Math.round(cols / 2 - w / 2);
+  for (let c = c0; c < c0 + w; c++) for (let r = L.sign - 1; r <= L.sign + 1; r++) fill(c, r, [18, 40, 120], 0.95);
+  text(c0 + 3, L.sign, STATION, [255, 255, 255]);
+  put(c0 + 1, L.sign, 'М', [255, 60, 60]);
+  // схема линии
+  const line = '●──●──●──◉──●──●', lc = Math.round(cols / 2 - line.length / 2);
+  for (let i = 0; i < line.length; i++) {
+    const cur = line[i] === '◉', blink = cur && Math.sin(t * 6) > 0;
+    put(lc + i, L.sign + 3, line[i], cur ? (blink ? [255, 255, 255] : [255, 80, 80]) : [220, 60, 60], 0.85);
+  }
+  // часы — реальное время
+  const d = new Date(), hh = String(d.getHours()).padStart(2, '0'), mm = String(d.getMinutes()).padStart(2, '0'), ss = String(d.getSeconds()).padStart(2, '0');
+  text(cols - 12, L.sign, `${hh}:${mm}:${ss}`, [255, 70, 60]);
+  // пути: шпалы и рельсы
+  for (let c = 0; c < cols; c++) {
+    put(c, L.rail, c % 3 === 0 ? '#' : '=', [120, 115, 110], 0.55 + glowR * 0.4);
+    put(c, L.rail - 1, '_', [70, 70, 75], 0.4);
+  }
+  // край платформы и пол
+  for (let c = 0; c < cols; c++) {
+    put(c, L.edge, '▀', [255, 200, 40], 0.85);
+    for (let r = L.floor; r < rows; r++) {
+      const depth = (r - L.floor) / (rows - L.floor);
+      const ch = (r + Math.floor(c / (2 + depth * 4))) % 3 === 0 ? '_' : (c % 7 === 0 ? '.' : ' ');
+      if (ch !== ' ') put(c, r, ch, [160, 150, 140], 0.12 + depth * 0.1);
+    }
+  }
+}
+
+// ── поезд: 4 вагона, кабина с фарами спереди (слева) ──
+
+const CAR = 58, GAP = 2, NCARS = 4, TRAIN = NCARS * (CAR + GAP);
+const DOORS = [9, 26, 43];                   // левый край каждой двери, ширина 6
+const cars = [];
+function newPassengers() {
+  cars.length = 0;
+  for (let k = 0; k < NCARS; k++) {
+    const ps = [];
+    for (let i = 0; i < 7; i++) ps.push({ lc: 3 + rand() * (CAR - 6), sit: rand() < 0.45, h: rand(), ph: rand() * TAU });
+    cars.push(ps);
+  }
+}
+
+function personMask(x, y, walk, fat) {         // силуэт: x — ширина, y — 0 ноги … 1 макушка
+  const hx = x / fat;
+  if ((hx * hx) / 0.0049 + ((y - 0.9) ** 2) / 0.0081 < 1) return 2;        // голова
+  if (y > 0.47 && y < 0.82 && Math.abs(hx) < 0.13 - Math.max(0, y - 0.76) * 0.9) return 1;   // корпус
+  if (y > 0.5 && y < 0.79 && Math.abs(hx) > 0.13 && Math.abs(hx) < 0.17) return 1;          // руки
+  const sw = Math.sin(walk) * 0.06 * (0.5 - y) * 2;
+  if (y <= 0.5 && Math.abs(hx - 0.055 - sw) < 0.04) return 1;                 // ноги
+  if (y <= 0.5 && Math.abs(hx + 0.055 + sw) < 0.04) return 1;
+  return 0;
+}
+// рисуем человека высотой h рядов; back — свет за спиной (поезд), даёт контур
+function person(cx, feet, h, walk, fat, back, dark = [16, 17, 20]) {
+  const wcol = h * 1.55 * 0.4;
+  for (let r = Math.round(feet - h); r <= feet; r++)
+    for (let c = Math.round(cx - wcol / 2); c <= cx + wcol / 2; c++) {
+      const x = (c - cx) / (h * 1.55), y = (feet - r) / h;
+      const m = personMask(x, y, walk, fat);
+      if (!m) continue;
+      const edge = !personMask(x + 1 / (h * 1.55), y, walk, fat) || !personMask(x - 1 / (h * 1.55), y, walk, fat)
+                || !personMask(x, y + 1 / h, walk, fat);
+      fill(c, r, [0, 0, 0], 1);
+      if (edge && back > 0.05) put(c, r, h > 12 ? (c < cx ? '(' : ')') : ':', [255, 225, 170], back * (h > 12 ? 0.55 : 1));
+      else if (h <= 12) put(c, r, m === 2 ? '@' : '#', dark, 0.9);
+    }
+}
+
+function train(x0, speed, doors, t, lights) {
+  const blur = Math.min(1, Math.max(0, (Math.abs(speed) - 18) / 40));
+  for (let k = 0; k < NCARS; k++) {
+    const cx = x0 + k * (CAR + GAP);
+    if (cx > cols + 2 || cx + CAR < -2) continue;
+    for (let lc = 0; lc < CAR; lc++) {
+      const c = Math.round(cx + lc); if (c < 0 || c >= cols) continue;
+      const lead = k === 0, tail = k === NCARS - 1;
+      const nose = lead ? Math.max(0, 4 - lc) : 0;               // скруглённая кабина
+      const top = L.trainTop + (nose > 0 ? Math.ceil(nose * 0.7) : 0);
+      put(c, top, lc === 0 || lc === CAR - 1 ? '.' : '_', [200, 205, 215], 0.8);
+      for (let r = top + 1; r < L.trainBot; r++) {
+        fill(c, r, [26, 30, 38], 1);
+        let ch = ':', col = [150, 160, 175], a = 0.35;
+        const inDoor = DOORS.some(d => lc >= d && lc < d + 6);
+        const isWin = r >= L.win && r < L.win + 5 && !inDoor && (lc % 8) > 1 && lc > 3 && lc < CAR - 3;
+        const doorWin = inDoor && r >= L.win && r < L.win + 4;
+        if (r === top + 1) { ch = lc % 5 === 0 ? '=' : '-'; a = 0.5; }
+        if (r === L.belt) { ch = '='; col = [70, 130, 255]; a = 0.9; }                         // полоса
+        if (r > L.belt && r < L.trainBot - 1) { ch = '.'; a = 0.25; }
+        if (inDoor) {
+          const d = DOORS.find(d => lc >= d && lc < d + 6), dl = lc - d;
+          const open = doors * 3, gap = dl < 3 ? dl < 3 - open : dl >= 3 + open;
+          if (!gap && r >= L.win - 1 && r < L.trainBot - 1) { fill(c, r, [255, 220, 160], 0.5 + 0.2 * lights); ch = ' '; }
+          else if (dl === 0 || dl === 5) { ch = '|'; a = 0.7; }
+          else if (doorWin) { fill(c, r, [255, 215, 150], 0.55 * lights); ch = ' '; }
+        }
+        if (isWin) { fill(c, r, [255, 215, 150], 0.55 * lights); ch = r === L.win ? '-' : ' '; col = [255, 240, 210]; a = 0.6; }
+        if (blur > 0 && r >= L.win && r < L.win + 5) {                                       // смаз на скорости
+          fill(c, r, [255, 215, 150], 0.25 + 0.3 * blur * lights);
+          ch = (lc + r + Math.floor(t * 30)) % 3 ? '-' : '='; col = [255, 240, 220]; a = 0.4 + 0.5 * blur;
+        }
+        if (ch !== ' ') put(c, r, ch, col, a);
+      }
+      if (lead && lc === 1) for (const rr of [L.belt - 1, L.belt + 1])      // фары
+        { put(c, rr, '@', [255, 255, 230], 1); }
+      if (tail && lc === CAR - 2) for (const rr of [L.belt - 1, L.belt + 1]) put(c, rr, 'o', [255, 40, 40], 1);
+      if ((lc === 7 || lc === 11 || lc === CAR - 12 || lc === CAR - 8))      // колёса
+        put(c, L.trainBot - 1, '-\\|/'[Math.floor(-x0 * 1.3 + lc) & 3], [200, 200, 210], 0.8);
+    }
+    // пассажиры внутри: тёмные силуэты на светлых окнах
+    if (blur < 0.5) for (const p of cars[k]) {
+      const px = cx + p.lc;
+      const sway = Math.sin(t * 2 + p.ph) * 0.3 - speed * 0.01;
+      person(px + sway, p.sit ? L.win + 4 : L.win + 5, p.sit ? 3 : 4.6, 0, 0.9 + p.h * 0.3, 0, [40, 32, 24]);
+    }
+    text(cx + CAR / 2 - 2, L.belt + 2, String(81230 + k * 7).slice(0, 4), [140, 150, 170], 0.5);
+  }
+  // свет фар впереди и искры из-под колёс
+  if (x0 > -5 && x0 < cols) {
+    for (let q = 1; q < 14; q++) put(x0 - q * 2, L.belt, '-', [255, 250, 220], (1 - q / 14) * 0.5 * lights);
+  }
+  if (Math.abs(speed) > 4 && rand() < 0.35) {
+    const sc = x0 + rand() * TRAIN; if (sc > 0 && sc < cols) put(sc, L.rail, '*', [255, 200, 90], 1);
+  }
+  return blur;
+}
+
+// ── сценарий: ожидание → прибытие → двери → посадка → отправление ──
+
+const CYCLE = 27, STOP_X = -66, START_X = 0;
+function schedule(t) {
+  const c = t % CYCLE;
+  let x0, doors = 0, phase;
+  if (c < 6) { x0 = cols + 30; phase = 'wait'; }
+  else if (c < 11) { const k = (c - 6) / 5; x0 = lerp(cols + 2, STOP_X, 1 - Math.pow(1 - k, 2.4)); phase = 'arrive'; }
+  else if (c < 20) {
+    x0 = STOP_X; phase = c < 18 ? 'board' : 'close';
+    doors = smooth((c - 11.4) / 0.9) * (1 - smooth((c - 18.6) / 0.9));
+  }
+  else { const k = (c - 20) / 7; x0 = STOP_X - Math.pow(k, 2.2) * (TRAIN + 40); phase = 'depart'; }
+  return { c, x0, doors, phase, cycle: Math.floor(t / CYCLE) };
+}
+
+// люди на платформе: ждут, идут к дверям, выходят из вагонов
+let crowd = [], lastCycle = -1, boardedIn = 0;
+function newCrowd() {
+  crowd = [];
+  for (let i = 0; i < 6; i++) crowd.push({ x: 4 + rand() * (cols - 8), near: rand() < 0.4, fat: 0.85 + rand() * 0.4,
+    h: rand(), walk: 0, mode: 'wait', target: 0, sp: 5 + rand() * 4 });
+  newPassengers();
+}
+function doorCols() {
+  const out = [];
+  for (let k = 0; k < NCARS; k++) for (const d of DOORS) {
+    const c = STOP_X + k * (CAR + GAP) + d + 3; if (c > 2 && c < cols - 2) out.push(c);
+  }
+  return out;
+}
+function updateCrowd(S, dt) {
+  if (S.cycle !== lastCycle) { lastCycle = S.cycle; newCrowd(); }
+  const dc = doorCols();
+  if (S.phase === 'board' && S.c > 12 && S.c < 12 + dt * 1.01) {          // выходящие из вагонов
+    for (let i = 0; i < 3; i++) {
+      const d = dc[(rand() * dc.length) | 0];
+      crowd.push({ x: d, near: false, fat: 0.85 + rand() * 0.4, h: rand(), walk: 0, mode: 'exit',
+                   target: rand() < 0.5 ? -8 : cols + 8, sp: 6 + rand() * 3, born: S.c + i * 0.7 });
+    }
+  }
+  for (const p of crowd) {
+    if (p.mode === 'wait' && S.phase === 'board') {
+      p.mode = 'board'; p.target = dc.reduce((b, d) => Math.abs(d - p.x) < Math.abs(b - p.x) ? d : b, dc[0]);
+    }
+    if ((p.mode === 'board' || p.mode === 'exit') && (p.born === undefined || S.c > p.born)) {
+      const dx = p.target - p.x, st = Math.sign(dx) * Math.min(Math.abs(dx), p.sp * dt);
+      p.x += st; p.walk += Math.abs(st) * 0.9;
+      if (Math.abs(dx) < 0.5 && p.mode === 'board') { p.mode = 'gone'; boardedIn++; }
+    }
+  }
+  crowd = crowd.filter(p => p.mode !== 'gone' && p.x > -10 && p.x < cols + 10);
+}
+
+// ── объявление в стиле табло ──
+
+function announce(S) {
+  let msg = '';
+  if (S.phase === 'wait' && S.c > 2.5) msg = 'Поезд прибывает. Отойдите от края платформы';
+  else if (S.phase === 'board') msg = `Станция «${STATION}»`;
+  else if (S.phase === 'close') msg = `Осторожно, двери закрываются. Следующая станция — «${NEXT}»`;
+  if (!msg) return;
+  const start = S.phase === 'wait' ? 2.5 : S.phase === 'board' ? 11 : 18;
+  const n = Math.min(msg.length, Math.floor((S.c - start) * 28));
+  const shown = msg.slice(0, n), c0 = Math.max(1, Math.round(cols / 2 - msg.length / 2));
+  text(c0, L.sign + 5, shown, [255, 200, 90], 0.9);
+}
+
+// ── отрисовка сетки ──
+
+const stats = { speed: 0, people: 0, letters: 0 };
+let honk = 0;
+
+function flush(shake) {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  const ox = shake ? (Math.random() - .5) * shake : 0, oy = shake ? (Math.random() - .5) * shake : 0;
+  ctx.font = `${Math.min(chh * 0.95, cw / 0.6).toFixed(2)}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  let letters = 0;
+  for (let i = 0; i < cols * rows; i++) {
+    const a = G.bg[i * 4 + 3]; if (a <= 0) continue;
+    ctx.fillStyle = `rgba(${G.bg[i * 4] | 0},${G.bg[i * 4 + 1] | 0},${G.bg[i * 4 + 2] | 0},${a.toFixed(3)})`;
+    ctx.fillRect((i % cols) * cw + ox, ((i / cols) | 0) * chh + oy, cw + 0.6, chh + 0.6);
+  }
+  for (let i = 0; i < cols * rows; i++) {
+    const a = G.fg[i * 4 + 3]; if (a <= 0.01 || G.ch[i] === ' ') continue;
+    ctx.fillStyle = `rgba(${G.fg[i * 4] | 0},${G.fg[i * 4 + 1] | 0},${G.fg[i * 4 + 2] | 0},${Math.min(1, a).toFixed(3)})`;
+    ctx.fillText(G.ch[i], (i % cols) * cw + cw / 2 + ox, ((i / cols) | 0) * chh + oy);
+    letters++;
+  }
+  stats.letters = letters;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const g1 = glow1.getContext('2d'), g2 = glow2.getContext('2d');
+  g1.clearRect(0, 0, glow1.width, glow1.height); g1.drawImage(cv, 0, 0, glow1.width, glow1.height);
+  g2.clearRect(0, 0, glow2.width, glow2.height); g2.drawImage(glow1, 0, 0, glow2.width, glow2.height);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.45; ctx.drawImage(glow1, 0, 0, cv.width, cv.height);
+  ctx.globalAlpha = 0.4; ctx.drawImage(glow2, 0, 0, cv.width, cv.height);
+}
+
+let prevX = null;
+function render(t, dt) {
+  const S = schedule(t);
+  const speed = prevX === null || dt === 0 ? 0 : (S.x0 - prevX) / dt; prevX = S.x0;
+  stats.speed = Math.abs(speed) * 0.33 * 3.6 * (S.phase === 'wait' ? 0 : 1);   // 1 колонка ≈ 0.33 м
+  updateCrowd(S, dt);
+  clear();
+  const glowR = S.phase === 'wait' ? smooth((S.c - 3) / 3) : S.phase === 'arrive' ? 1 - smooth((S.c - 7) / 2) : 0;
+  station(t, glowR + honk * 0.5);
+  announce(S);
+  // свет из тоннеля перед прибытием
+  if (glowR > 0) for (let r = L.trainTop; r < L.trainBot; r++)
+    for (let q = 0; q < 10; q++) put(cols - 1 - q, r, q < 3 ? '|' : '.', [255, 250, 220], glowR * (1 - q / 10) * 0.6);
+  const blur = train(S.x0, speed, S.doors, t, 1);
+  if (honk > 0.05 && S.x0 < cols) for (const rr of [L.belt - 1, L.belt + 1])
+    for (let q = 1; q < 6; q++) put(S.x0 + 1 - q, rr, '-', [255, 255, 255], honk * (1 - q / 6));
+  // люди: дальний ряд, затем ближний (выше и темнее)
+  const backlit = S.x0 < cols && S.x0 + TRAIN > 0 ? 0.75 : 0.2;
+  for (const p of crowd.filter(p => !p.near)) person(p.x, L.floor + 3, 9, p.walk, p.fat, backlit);
+  for (const p of crowd.filter(p => p.near)) person(p.x, rows - 1, 24, p.walk, p.fat, backlit * 0.8);
+  stats.people = crowd.length;
+  flush(blur * 2.2 + (S.phase === 'arrive' ? 0.6 : 0));
+}
+
+// ── панель кода: показывает этот самый файл и «печатает» текущую строку ──
+
+const SRC = document.getElementById('src').textContent.replace(/^\n+|\s+$/g, '').split('\n');
+const KW = /^(const|let|var|function|return|for|if|else|of|new|while|continue|break|true|false|null)$/;
+function hl(line) {
+  const esc = x => x.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const re = /(\/\/.*$)|('(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(line))) {
+    out += esc(line.slice(last, m.index));
+    const tok = esc(m[0]);
+    if (m[1]) out += `<span class="c">${tok}</span>`;
+    else if (m[2]) out += `<span class="s">${tok}</span>`;
+    else if (m[3]) out += `<span class="n">${tok}</span>`;
+    else if (KW.test(m[4])) out += `<span class="k">${tok}</span>`;
+    else if (line[re.lastIndex] === '(') out += `<span class="f">${tok}</span>`;
+    else out += tok;
+    last = re.lastIndex;
+  }
+  return out + esc(line.slice(last));
+}
+const pre = document.getElementById('pre'), codeBox = document.getElementById('code');
+const rowsEl = SRC.map((l, i) => {
+  const d = document.createElement('div'); d.className = 'ln';
+  d.innerHTML = `<i>${i + 1}</i><span>${hl(l) || ' '}</span>`;
+  pre.appendChild(d); return d;
+});
+const LINES_PER_S = 7, CODE_LOOP = SRC.length / LINES_PER_S + 6;
+let curLine = -1, curChars = -1, scrollY = 0;
+
+function code(t) {
+  const pos = Math.min(SRC.length - 1e-3, t * LINES_PER_S);
+  const li = Math.floor(pos), text = SRC[li];
+  const nch = Math.floor((pos - li) * 1.4 * text.length);
+  if (li !== curLine) {
+    if (curLine >= 0 && rowsEl[curLine]) {
+      rowsEl[curLine].classList.remove('cur');
+      rowsEl[curLine].lastChild.innerHTML = hl(SRC[curLine]) || ' ';
+    }
+    curLine = li; curChars = -1; rowsEl[li].classList.add('cur');
+  }
+  if (nch !== curChars) {
+    curChars = nch;
+    rowsEl[li].lastChild.innerHTML = hl(text.slice(0, nch)) + '<span class="cursor"></span>';
+  }
+  const target = rowsEl[li].offsetTop - codeBox.clientHeight * 0.38;
+  scrollY += (target - scrollY) * 0.12;
+  pre.style.transform = `translateY(${-scrollY.toFixed(1)}px)`;
+}
+
+// ── цикл анимации ──
+
+const hudT = document.getElementById('hudT'), hudL = document.getElementById('hudL');
+const fpsEl = document.getElementById('fps'), pauseBtn = document.getElementById('pause');
+let paused = false, clock = 0, lastNow = performance.now(), fps = 60;
+
+function reset() { clock = 0; scrollY = 0; lastCycle = -1; prevX = null; boardedIn = 0; rand = rng(11); }
+
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.1, (now - lastNow) / 1000)); lastNow = now;
+  fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  if (!paused) { clock += dt; honk *= Math.pow(0.08, dt); }
+  render(clock, paused ? 0 : dt);
+  code(clock % CODE_LOOP);
+  hudT.innerHTML = `<b></b>t ${clock.toFixed(2)}s`;
+  const S = schedule(clock), wait = S.phase === 'wait' ? Math.ceil(6 - S.c) : 0;
+  hudL.textContent = `ascii metro · 2026   ст. «${STATION}»\nspeed ${stats.speed.toFixed(0).padStart(2, ' ')} km/h   ${wait ? `поезд через ${wait} c` : S.phase === 'depart' ? 'отправление' : S.phase === 'arrive' ? 'прибытие' : 'посадка'}\nвошли ${boardedIn}   letters ${stats.letters.toLocaleString('en')}`;
+  fpsEl.textContent = paused ? 'paused' : `running · ${Math.round(fps)} fps`;
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('stage').addEventListener('click', e => {
+  if (e.target.id === 'replay') { reset(); paused = false; pauseBtn.textContent = '⏸'; return; }
+  if (e.target.id === 'pause') { paused = !paused; pauseBtn.textContent = paused ? '▶' : '⏸'; return; }
+  if (paused) return;
+  honk = 1;                                    // гудок: вспышка фар
+  const S = schedule(clock); if (S.phase === 'wait' && S.c < 3) clock += 3 - S.c;   // и поезд приходит быстрее
+  try { window.Telegram.WebApp.HapticFeedback.impactOccurred('medium'); } catch (e) {}
+});
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+
+// Telegram Mini App: на весь экран, чёрная шапка
+try {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+  }
+} catch (e) {}
+</script>
+</body>
+</html>
