@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ASCII-аэропорт</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;
+    font-family:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;color:#bbb}
+  #app{position:relative;height:100%;width:min(100vw,62vh);margin:0 auto;display:flex;flex-direction:column;background:#000}
+  #stage{position:relative;flex:0 0 61%;overflow:hidden;cursor:pointer;touch-action:manipulation}
+  #cv{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .hud{position:absolute;font-size:11px;line-height:1.55;color:#7d8590;pointer-events:none;white-space:pre}
+  #hudL{left:6%;bottom:2.5%}
+  #hudT{display:none}
+  #hudT b{display:inline-block;width:6px;height:6px;border-radius:50%;background:#ff3b4f;margin-right:6px;vertical-align:1px}
+  .btns{position:absolute;left:4%;top:3%;display:flex;gap:6px}
+  .btns button{background:none;border:1px solid #2a2f36;color:#7d8590;font:inherit;font-size:11px;
+    padding:3px 8px;border-radius:4px;cursor:pointer}
+  .btns button:hover{color:#ddd;border-color:#4a525c}
+  #hint{position:absolute;right:4%;top:3%;font-size:10px;color:#4a525c;pointer-events:none}
+  #bar{display:flex;justify-content:space-between;font-size:12px;color:#ddd;padding:6px 3.5%;border-bottom:1px solid #16191d}
+  #bar span:last-child{color:#888}
+  #code{position:relative;flex:1;overflow:hidden;font-size:clamp(10px,3.3vw,15px);line-height:1.6;
+    -webkit-mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%);mask-image:linear-gradient(#0000 0,#000 14%,#000 72%,#0000 100%)}
+  #pre{position:absolute;left:0;right:0;top:0;margin:0;will-change:transform}
+  .ln{display:flex;white-space:pre;border-left:3px solid transparent}
+  .ln i{font-style:normal;color:#33383e;width:3.2em;text-align:right;padding-right:1.4em;flex:none}
+  .ln.cur{background:#160d10;border-left-color:#ff5d6c}
+  .ln.cur i{color:#777}
+  .k{color:#ff7a90}.f{color:#82aaff}.n{color:#f6c177}.s{color:#c3e88d}.c{color:#5a5f66}
+  .cursor{display:inline-block;width:.6em;height:1.1em;vertical-align:-.2em;background:#ff5d6c;animation:bl 1s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div class="btns"><button id="replay">↻ заново</button><button id="pause">⏸</button></div>
+    <div id="hint">тап — перелистать табло</div>
+    <div class="hud" id="hudT"><b></b>t 0.00s</div>
+    <div class="hud" id="hudL"></div>
+  </div>
+  <div id="bar"><span>$ node airport.js</span><span id="fps">running · 60 fps</span></div>
+  <div id="code"><div id="pre"></div></div>
+</div>
+
+<script id="src">
+
+// ── airport.js — табло вылетов с перекидными буквами и взлёт за окном терминала ──
+
+const TAU = Math.PI * 2;
+function rng(seed) {                          // детерминированный генератор
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+let rand = rng(21);
+const smooth = x => (x = Math.min(1, Math.max(0, x)), x * x * (3 - 2 * x));
+const pick = a => a[(rand() * a.length) | 0];
+
+// ── рейсы (авиакомпании вымышленные) ──
+
+const CITIES = ['СОЧИ', 'КАЗАНЬ', 'ДУБАЙ', 'СТАМБУЛ', 'НОВОСИБИРСК', 'ВЛАДИВОСТОК', 'КАЛИНИНГРАД',
+  'ЕРЕВАН', 'ТБИЛИСИ', 'МИНСК', 'САМАРКАНД', 'ПЕКИН', 'БАНГКОК', 'МУРМАНСК', 'ЕКАТЕРИНБУРГ', 'АНТАЛЬЯ', 'ИРКУТСК'];
+const AIRLINES = ['КД', 'ПК', 'АС', 'БТ'];
+const COLS = [['ВРЕМЯ', 5], ['РЕЙС', 7], ['НАПРАВЛЕНИЕ', 12], ['ВЫХ', 3], ['СТАТУС', 11]];
+const ROWS = 8;
+let clockMin = 0;                             // минуты от полуночи для следующего рейса
+
+function hhmm(m) { m = ((m % 1440) + 1440) % 1440; return String((m / 60) | 0).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); }
+function newFlight() {
+  clockMin += 5 + ((rand() * 4) | 0) * 5;
+  const status = rand() < 0.12 ? 'ЗАДЕРЖАН' : rand() < 0.05 ? 'ОТМЕНЁН' : rand() < 0.5 ? 'РЕГИСТРАЦИЯ' : 'ПО ПЛАНУ';
+  return { time: hhmm(clockMin), code: `${pick(AIRLINES)} ${100 + ((rand() * 900) | 0)}`,
+           dest: pick(CITIES), gate: pick('ABCD') + (1 + ((rand() * 29) | 0)), status };
+}
+let flights = [];
+function initFlights() {
+  const d = new Date(); clockMin = d.getHours() * 60 + d.getMinutes() - 5;
+  flights = []; for (let i = 0; i < ROWS; i++) flights.push(newFlight());
+  flights[0].status = 'ПОСАДКА'; flights[1].status = 'РЕГИСТРАЦИЯ';
+}
+const pad = (s, n) => (s + ' '.repeat(n)).slice(0, n);
+const rowText = f => COLS.map(([k, n]) => pad({ 'ВРЕМЯ': f.time, 'РЕЙС': f.code, 'НАПРАВЛЕНИЕ': f.dest, 'ВЫХ': f.gate, 'СТАТУС': f.status }[k], n)).join(' ');
+
+// ── перекидное табло: каждая буква — отдельная «шторка» ──
+
+const FLAPS = ' АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯABCD0123456789:-';
+const BW = COLS.reduce((s, c) => s + c[1], 0) + COLS.length - 1;    // ширина строки в клетках
+let tiles = [];                               // tiles[row][col] = { ch, target, prev, steps, t }
+
+function initTiles() {
+  tiles = [];
+  for (let r = 0; r < ROWS; r++) {
+    const s = rowText(flights[r]); tiles.push([]);
+    for (let c = 0; c < BW; c++) tiles[r].push({ ch: ' ', prev: ' ', target: s[c], steps: 6 + ((rand() * 14) | 0), t: rand() * 0.6 + r * 0.08 });
+  }
+}
+function setTargets(spin = 0) {                // новые буквы; spin — сколько лишних оборотов
+  for (let r = 0; r < ROWS; r++) {
+    const s = rowText(flights[r]);
+    for (let c = 0; c < BW; c++) {
+      const tl = tiles[r][c];
+      if (tl.target !== s[c] || spin) { tl.target = s[c]; tl.steps = Math.max(tl.steps, (spin ? spin : 3) + ((rand() * 8) | 0)); tl.t = -c * 0.01 - r * 0.03; }
+    }
+  }
+}
+const STEP = 0.055;                           // одна шторка — 55 мс
+let flapsThisFrame = 0;
+function updateTiles(dt) {
+  flapsThisFrame = 0;
+  for (const row of tiles) for (const tl of row) {
+    if (tl.ch === tl.target && tl.steps <= 0) continue;
+    tl.t += dt;
+    while (tl.t >= STEP) {
+      tl.t -= STEP; tl.prev = tl.ch; flapsThisFrame++;
+      if (tl.steps > 1) { tl.ch = FLAPS[(FLAPS.indexOf(tl.ch) + 1 + FLAPS.length) % FLAPS.length]; tl.steps--; }
+      else { tl.ch = tl.target; tl.steps = 0; break; }
+    }
+  }
+}
+
+// ── холст ──
+
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const glow1 = document.createElement('canvas'), glow2 = document.createElement('canvas');
+let W, H, DPR, tw, th, bx, by, sceneY, cols, rows, cw, chh, G;
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  glow1.width = cv.width >> 2; glow1.height = cv.height >> 2;
+  glow2.width = cv.width >> 3; glow2.height = cv.height >> 3;
+  tw = Math.min(W / (BW + 2), 15); th = tw * 1.6; bx = (W - tw * BW) / 2; by = H * 0.14;
+  sceneY = by + (ROWS + 1.6) * th * 1.18 + 10;
+  cols = 80; cw = W / cols; chh = cw * 1.55; rows = Math.ceil((H - sceneY - 62) / chh);
+  G = { ch: new Array(cols * rows), fg: new Float32Array(cols * rows * 4) };
+}
+function put(c, r, ch, rgb, a = 1) {
+  c = Math.round(c); r = Math.round(r); if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+  const i = r * cols + c; G.ch[i] = ch;
+  G.fg[i * 4] = rgb[0]; G.fg[i * 4 + 1] = rgb[1]; G.fg[i * 4 + 2] = rgb[2]; G.fg[i * 4 + 3] = a;
+}
+
+const STATUS_COL = { 'ПОСАДКА': [90, 255, 120], 'ЗАДЕРЖАН': [255, 160, 40], 'ОТМЕНЁН': [255, 70, 70],
+  'ВЫЛЕТЕЛ': [150, 150, 150], 'ВЗЛЁТ': [120, 200, 255], 'РЕГИСТРАЦИЯ': [255, 230, 120], 'ПО ПЛАНУ': [235, 235, 235] };
+
+function drawBoard(t) {
+  ctx.font = `600 ${(th * 0.62).toFixed(1)}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // заголовок
+  ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left';
+  ctx.fillText('✈ ВЫЛЕТ · DEPARTURES', bx, by - th * 0.55);
+  const d = new Date();
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ffffff';
+  ctx.fillText(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}${d.getSeconds() % 2 ? ':' : ' '}${String(d.getSeconds()).padStart(2, '0')}`, bx + tw * BW, by - th * 0.55);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#6f7a8a';
+  ctx.font = `${(th * 0.42).toFixed(1)}px ui-monospace, Menlo, Consolas, monospace`;
+  let x = bx;
+  for (const [k, n] of COLS) { ctx.fillText(k, x + 1, by + th * 0.3); x += (n + 1) * tw; }
+  ctx.font = `600 ${(th * 0.62).toFixed(1)}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textAlign = 'center';
+  const statusStart = BW - 11;
+  for (let r = 0; r < ROWS; r++) {
+    const y = by + th * 0.75 + r * th * 1.18, st = flights[r].status, scol = STATUS_COL[st] || [235, 235, 235];
+    const blink = st === 'ПОСАДКА' && Math.sin(t * 5) < -0.2;
+    for (let c = 0; c < BW; c++) {
+      const tl = tiles[r][c], x0 = bx + c * tw;
+      const isSep = [5, 13, 26, 30].includes(c);
+      if (isSep && tl.ch === ' ' && tl.target === ' ') continue;
+      ctx.fillStyle = '#16181c'; ctx.fillRect(x0 + 0.6, y, tw - 1.2, th);                   // шторка
+      const p = tl.steps > 0 || tl.ch !== tl.target ? tl.t / STEP : 1;
+      let col = c >= statusStart ? scol : r === 0 ? [255, 255, 255] : [235, 228, 200];
+      if (blink && c >= statusStart) col = col.map(v => v * 0.35);
+      ctx.fillStyle = `rgb(${col[0] | 0},${col[1] | 0},${col[2] | 0})`;
+      if (p < 1) {                                // половинки: сверху новая буква, снизу старая
+        ctx.save(); ctx.beginPath(); ctx.rect(x0, y, tw, th / 2); ctx.clip();
+        ctx.fillText(tl.ch, x0 + tw / 2, y + th / 2 + 0.5); ctx.restore();
+        ctx.save(); ctx.beginPath(); ctx.rect(x0, y + th / 2, tw, th / 2); ctx.clip();
+        ctx.fillText(tl.prev, x0 + tw / 2, y + th / 2 + 0.5); ctx.restore();
+        const fh = (th / 2) * Math.cos(p * Math.PI);                                         // падающая шторка
+        ctx.fillStyle = p < 0.5 ? '#22252b' : '#101215';
+        ctx.fillRect(x0 + 0.6, y + th / 2 - (fh > 0 ? fh : 0), tw - 1.2, Math.abs(fh));
+      } else ctx.fillText(tl.ch, x0 + tw / 2, y + th / 2 + 0.5);
+      ctx.fillStyle = '#000'; ctx.fillRect(x0, y + th / 2 - 0.5, tw, 1);                   // щель посередине
+    }
+  }
+}
+
+// ── вид из окна: закат, полоса, самолёт ──
+
+const CYCLE = 22, PL = 34;                    // длина самолёта в клетках
+function poly(px, py, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+// u — от хвоста к носу (клетки), v — вверх от оси фюзеляжа (ряды)
+function planeMask(u, v, gear) {
+  if (u < 0 || u > PL) return 0;
+  const c = u < 8 ? (8 - u) * 0.18 : 0;
+  const r = u < 8 ? 0.6 + 1.2 * (u / 8) : u > PL - 5 ? 1.8 * Math.sqrt(Math.max(0, 1 - ((u - (PL - 5)) / 5) ** 2)) : 1.8;
+  if (Math.abs(v - c) < r) return Math.abs(v - c - 0.45) < 0.33 && u > 7 && u < PL - 5 ? 3 : 1;   // 3 — иллюминаторы
+  if (poly(u, v, [[0.4, 1.3], [7, 1.4], [3.2, 6.5], [0.6, 6.5]])) return 2;                  // киль
+  if (poly(u, v, [[12, -1.0], [20, -1.0], [15, -2.4], [12.5, -2.4]])) return 2;              // крыло
+  if (((u - 17.5) / 2.6) ** 2 + ((v + 2.6) / 0.85) ** 2 < 1) return 4;                      // двигатель
+  if (gear > 0 && v < -1.7 && v > -1.7 - 1.9 * gear && (Math.abs(u - 15) < 0.5 || Math.abs(u - (PL - 6)) < 0.5)) return 5;
+  return 0;
+}
+
+function plane(t) {
+  const c = t % CYCLE;
+  let x, alt = 0, pitch = 0, gear = 1, speed = 0;
+  if (c < 3) { x = 4; }
+  else if (c < 10.5) { const k = c - 3; x = 4 + 0.32 * k * k; speed = 0.64 * k; }
+  else { const k = c - 10.5; x = 4 + 0.32 * 56.25 + 4.8 * k + 0.5 * k * k; speed = 4.8 + 1.0 * k;
+         pitch = Math.min(0.22, k * 0.15); alt = k * k * 0.45 + k * 0.5; gear = 1 - smooth((k - 1.5) / 1.5); }
+  return { c, x, alt, pitch, gear, speed };
+}
+
+function scene(t, P) {
+  G.ch.fill(' '); G.fg.fill(0);
+  const horizon = Math.round(rows * 0.58), runway = horizon + 4;
+  // небо: от тёмно-синего к закату
+  const r2 = rng(5);
+  for (let r = 0; r < horizon; r++) {
+    const k = r / horizon;
+    const col = [lerp3(30, 255, k ** 2), lerp3(40, 120, k ** 2.2), lerp3(90, 60, k)];
+    for (let c = 0; c < cols; c++) {
+      const n = r2();
+      if (k < 0.45 && n < 0.03) put(c, r, n < 0.008 ? '*' : '.', [220, 225, 255], 0.3 + 0.4 * Math.abs(Math.sin(t * 1.3 + c * r)));
+      else if (n < 0.12 + k * 0.35) put(c, r, k > 0.75 ? '-' : k > 0.5 ? '~' : '.', col, 0.12 + k * 0.4);
+    }
+  }
+  // солнце на горизонте
+  const sx = 16;
+  for (let r = horizon - 6; r < horizon; r++) for (let c = sx - 12; c <= sx + 12; c++) {
+    const d = Math.hypot((c - sx) / 1.55, (r - horizon + 0.5));
+    if (d < 4.2) put(c, r, d < 2.6 ? '@' : d < 3.5 ? 'o' : '.', [255, 215 - d * 30, 90 - d * 10], 1 - d / 6);
+  }
+  // далёкий город и деревья
+  for (let c = 0; c < cols; c++) {
+    const hgt = Math.max(0, Math.round(2.2 * Math.abs(Math.sin(c * 0.37)) + (c % 13 < 3 ? 2 : 0) - 0.6));
+    for (let q = 0; q < hgt; q++) put(c, horizon - 1 - q, q === hgt - 1 ? '_' : '|', [40, 35, 50], 0.9);
+    put(c, horizon, '_', [120, 90, 80], 0.6);
+  }
+  // поле и полоса
+  for (let r = horizon + 1; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (r === runway - 1 || r === runway + 2) { put(c, r, c % 2 ? '=' : '-', [150, 150, 160], 0.45); continue; }
+    if (r === runway + 1 && c % 6 < 3) { put(c, r, '-', [240, 240, 240], 0.55); continue; }
+    if (r === runway) continue;
+    if ((c * 7 + r * 13) % 11 === 0) put(c, r, ',', [70, 90, 60], 0.35);
+  }
+  for (let c = 1; c < cols; c += 5) {          // огни полосы
+    const on = (Math.floor(t * 6) + c) % 18 < 2;
+    put(c, runway - 1, 'o', [255, 255, 255], on ? 1 : 0.55);
+    put(c, runway + 2, 'o', c > cols - 8 ? [255, 60, 60] : [120, 170, 255], 0.8);
+  }
+  // самолёт: поворачиваем клетки обратно в систему самолёта и проверяем маску
+  const baseRow = runway - 3.6 - P.alt, cp = Math.cos(P.pitch), sp = Math.sin(P.pitch);
+  const flash = Math.sin(t * 9) > 0.85;
+  for (let r = Math.floor(baseRow - 12); r <= baseRow + 6; r++) for (let c = Math.floor(P.x - 6); c <= P.x + PL + 4; c++) {
+    const dx = c - P.x, dy = (baseRow - r) * 1.55;                 // в квадратных единицах
+    const u = dx * cp + dy * sp, v = (-dx * sp + dy * cp) / 1.55;
+    const m = planeMask(u, v, P.gear); if (!m) continue;
+    const up = planeMask(u, v + 0.6, P.gear) === 0, dn = planeMask(u, v - 0.6, P.gear) === 0;
+    let ch = '#', col = [215, 220, 230], a = 0.9;
+    if (m === 3) { ch = '.'; col = [255, 230, 170]; a = 1; }
+    else if (m === 4) { ch = u > 17.5 ? ')' : 'O'; col = [180, 185, 195]; }
+    else if (m === 5) { ch = '|'; col = [160, 160, 170]; }
+    else if (up) { ch = m === 2 ? '/' : '_'; col = [255, 200, 150]; a = 1; }             // верх подсвечен закатом
+    else if (dn) { ch = '-'; col = [120, 125, 140]; }
+    else ch = m === 2 ? '=' : '#';
+    put(c, r, ch, col, a);
+  }
+  // огни: маяк и строб
+  const tailR = baseRow - 6.5 * cp, tailC = P.x + 2 + 6.5 * sp;
+  if (flash) { put(tailC, tailR, '*', [255, 255, 255], 1); put(P.x + 16, baseRow + 2.4, '*', [255, 255, 255], 1); }
+  if (Math.sin(t * 4) > 0.5) put(P.x + 18, baseRow - 1.3 - 0.0, '+', [255, 50, 50], 1);
+  // реактивная струя за двигателем на разбеге
+  if (P.speed > 0.5) for (let q = 0; q < 14; q++) {
+    const jx = P.x + 14 - q * 1.4 - (t * 30 % 1.4), jy = baseRow + 2.6 + q * P.pitch * 0.8;
+    put(jx, Math.round(jy + (Math.random() - .5)), '~', [200, 200, 220], Math.max(0, 0.45 - q * 0.03) * Math.min(1, P.speed / 6));
+  }
+  // рамы панорамного окна
+  for (let r = 0; r < rows; r++) for (const c of [0, 26, 53, 79]) put(c, r, '║', [55, 60, 70], 1);
+  for (let c = 0; c < cols; c++) put(c, 0, '═', [55, 60, 70], 1);
+}
+const lerp3 = (a, b, k) => a + (b - a) * Math.min(1, Math.max(0, k));
+
+// ── сборка кадра ──
+
+const stats = { letters: 0, flaps: 0 };
+function flush() {
+  ctx.font = `${Math.min(chh * 0.95, cw / 0.6).toFixed(2)}px ui-monospace, Menlo, Consolas, monospace`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  let n = 0;
+  for (let i = 0; i < cols * rows; i++) {
+    const a = G.fg[i * 4 + 3]; if (a <= 0.01 || G.ch[i] === ' ') continue;
+    ctx.fillStyle = `rgba(${G.fg[i * 4] | 0},${G.fg[i * 4 + 1] | 0},${G.fg[i * 4 + 2] | 0},${Math.min(1, a).toFixed(3)})`;
+    ctx.fillText(G.ch[i], (i % cols) * cw + cw / 2, sceneY + ((i / cols) | 0) * chh); n++;
+  }
+  stats.letters = n + ROWS * BW;
+}
+function glow() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const g1 = glow1.getContext('2d'), g2 = glow2.getContext('2d');
+  g1.clearRect(0, 0, glow1.width, glow1.height); g1.drawImage(cv, 0, 0, glow1.width, glow1.height);
+  g2.clearRect(0, 0, glow2.width, glow2.height); g2.drawImage(glow1, 0, 0, glow2.width, glow2.height);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.4; ctx.drawImage(glow1, 0, 0, cv.width, cv.height);
+  ctx.globalAlpha = 0.35; ctx.drawImage(glow2, 0, 0, cv.width, cv.height);
+}
+
+let lastCycle = 0;
+function render(t, dt) {
+  // события табло, привязанные к взлёту
+  const P = plane(t), cyc = Math.floor(t / CYCLE);
+  if (cyc !== lastCycle) {                     // самолёт улетел — табло сдвигается
+    lastCycle = cyc;
+    flights.shift(); flights.push(newFlight());
+    flights[0].status = 'ПОСАДКА'; if (flights[1].status === 'ПО ПЛАНУ') flights[1].status = 'РЕГИСТРАЦИЯ';
+    setTargets(); buzz();
+  }
+  const want = P.c < 3 ? 'ПОСАДКА' : P.c < 10.5 ? 'ВЗЛЁТ' : 'ВЫЛЕТЕЛ';
+  if (flights[0].status !== want) { flights[0].status = want; setTargets(); }
+  updateTiles(dt);
+  stats.flaps += flapsThisFrame;
+
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  scene(t, P); flush();
+  drawBoard(t);
+  glow();
+  return P;
+}
+function buzz() { try { window.Telegram.WebApp.HapticFeedback.notificationOccurred('success'); } catch (e) {} }
+
+// ── панель кода: показывает этот самый файл и «печатает» текущую строку ──
+
+const SRC = document.getElementById('src').textContent.replace(/^\n+|\s+$/g, '').split('\n');
+const KW = /^(const|let|var|function|return|for|if|else|of|new|while|continue|break|true|false|null)$/;
+function hl(line) {
+  const esc = x => x.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const re = /(\/\/.*$)|('(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_$][\w$]*)/g;
+  let out = '', last = 0, m;
+  while ((m = re.exec(line))) {
+    out += esc(line.slice(last, m.index));
+    const tok = esc(m[0]);
+    if (m[1]) out += `<span class="c">${tok}</span>`;
+    else if (m[2]) out += `<span class="s">${tok}</span>`;
+    else if (m[3]) out += `<span class="n">${tok}</span>`;
+    else if (KW.test(m[4])) out += `<span class="k">${tok}</span>`;
+    else if (line[re.lastIndex] === '(') out += `<span class="f">${tok}</span>`;
+    else out += tok;
+    last = re.lastIndex;
+  }
+  return out + esc(line.slice(last));
+}
+const pre = document.getElementById('pre'), codeBox = document.getElementById('code');
+const rowsEl = SRC.map((l, i) => {
+  const d = document.createElement('div'); d.className = 'ln';
+  d.innerHTML = `<i>${i + 1}</i><span>${hl(l) || ' '}</span>`;
+  pre.appendChild(d); return d;
+});
+const LINES_PER_S = 7, CODE_LOOP = SRC.length / LINES_PER_S + 6;
+let curLine = -1, curChars = -1, scrollY = 0;
+
+function code(t) {
+  const pos = Math.min(SRC.length - 1e-3, t * LINES_PER_S);
+  const li = Math.floor(pos), text = SRC[li];
+  const nch = Math.floor((pos - li) * 1.4 * text.length);
+  if (li !== curLine) {
+    if (curLine >= 0 && rowsEl[curLine]) {
+      rowsEl[curLine].classList.remove('cur');
+      rowsEl[curLine].lastChild.innerHTML = hl(SRC[curLine]) || ' ';
+    }
+    curLine = li; curChars = -1; rowsEl[li].classList.add('cur');
+  }
+  if (nch !== curChars) {
+    curChars = nch;
+    rowsEl[li].lastChild.innerHTML = hl(text.slice(0, nch)) + '<span class="cursor"></span>';
+  }
+  const target = rowsEl[li].offsetTop - codeBox.clientHeight * 0.38;
+  scrollY += (target - scrollY) * 0.12;
+  pre.style.transform = `translateY(${-scrollY.toFixed(1)}px)`;
+}
+
+// ── цикл анимации ──
+
+const hudT = document.getElementById('hudT'), hudL = document.getElementById('hudL');
+const fpsEl = document.getElementById('fps'), pauseBtn = document.getElementById('pause');
+let paused = false, clock = 0, lastNow = performance.now(), fps = 60;
+
+function reset() { clock = 0; scrollY = 0; lastCycle = 0; rand = rng(21); initFlights(); initTiles(); }
+
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.1, (now - lastNow) / 1000)); lastNow = now;
+  fps += ((dt > 0 ? 1 / dt : 60) - fps) * 0.05;
+  if (!paused) clock += dt;
+  const P = render(clock, paused ? 0 : dt);
+  code(clock % CODE_LOOP);
+  hudT.innerHTML = `<b></b>t ${clock.toFixed(2)}s`;
+  const f = flights[0], kmh = Math.round(P.speed * 0.33 * 3.6 * 16), alt = Math.round(P.alt * 25);
+  hudL.textContent = `ascii airport · 2026   ${f.code} → ${f.dest}\nspeed ${String(kmh).padStart(3, ' ')} km/h   alt ${alt} m\nflaps ${stats.flaps.toLocaleString('en')}`;
+  fpsEl.textContent = paused ? 'paused' : `running · ${Math.round(fps)} fps`;
+  requestAnimationFrame(frame);
+}
+
+document.getElementById('stage').addEventListener('click', e => {
+  if (e.target.id === 'replay') { reset(); paused = false; pauseBtn.textContent = '⏸'; return; }
+  if (e.target.id === 'pause') { paused = !paused; pauseBtn.textContent = paused ? '▶' : '⏸'; return; }
+  if (paused) return;
+  setTargets(10); buzz();                      // все шторки делают круг
+});
+window.addEventListener('resize', resize);
+initFlights(); initTiles(); resize();
+requestAnimationFrame(frame);
+
+// Telegram Mini App: на весь экран, чёрная шапка
+try {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    tg.ready(); tg.expand();
+    tg.setHeaderColor('#000000'); tg.setBackgroundColor('#000000');
+    if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+  }
+} catch (e) {}
+</script>
+</body>
+</html>

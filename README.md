@@ -7,3 +7,4 @@ Telegram Mini App, буквы на canvas + JS.
 - Дрифт: https://aqsyloo.github.io/ascii-ring/drift/
 - V8: https://aqsyloo.github.io/ascii-ring/v8/
 - Метро: https://aqsyloo.github.io/ascii-ring/metro/
+- Аэропорт: https://aqsyloo.github.io/ascii-ring/airport/
